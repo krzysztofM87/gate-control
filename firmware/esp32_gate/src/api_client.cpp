@@ -1,14 +1,19 @@
 ﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
 
 #include "../include/config.h"
 #include "../include/api_client.h"
 #include "../include/gate_control.h"
 
 static DeviceConfig apiConfig;
+
+struct ParsedUrl {
+  bool ok = false;
+  String host = "";
+  uint16_t port = 80;
+  String path = "/";
+};
 
 static String normalizeBaseUrl(String url) {
   url.trim();
@@ -50,6 +55,49 @@ static String jsonEscape(const String &value) {
   out.replace("\n", "\\n");
   out.replace("\r", "\\r");
   return out;
+}
+
+static bool parseHttpUrl(const String &url, ParsedUrl &parsed) {
+  if (!url.startsWith("http://")) {
+    Serial.println("[HTTP] Only http:// is supported in stable raw client mode");
+    return false;
+  }
+
+  String rest = url.substring(7);
+
+  int slashPos = rest.indexOf("/");
+  String hostPort;
+
+  if (slashPos >= 0) {
+    hostPort = rest.substring(0, slashPos);
+    parsed.path = rest.substring(slashPos);
+  } else {
+    hostPort = rest;
+    parsed.path = "/";
+  }
+
+  int colonPos = hostPort.indexOf(":");
+
+  if (colonPos >= 0) {
+    parsed.host = hostPort.substring(0, colonPos);
+    parsed.port = (uint16_t)hostPort.substring(colonPos + 1).toInt();
+
+    if (parsed.port == 0) {
+      parsed.port = 80;
+    }
+  } else {
+    parsed.host = hostPort;
+    parsed.port = 80;
+  }
+
+  parsed.host.trim();
+
+  if (parsed.host.length() == 0) {
+    return false;
+  }
+
+  parsed.ok = true;
+  return true;
 }
 
 static String extractJsonString(const String &json, const String &key) {
@@ -168,34 +216,6 @@ static uint8_t parseGateTargetFromPayload(const String &payload, const String &c
     return GATE_TARGET_BOTH;
   }
 
-  int buttonNumber = extractJsonInt(payload, "button", 0);
-
-  if (buttonNumber == 1) {
-    return GATE_TARGET_1;
-  }
-
-  if (buttonNumber == 2) {
-    return GATE_TARGET_2;
-  }
-
-  if (buttonNumber == 3) {
-    return GATE_TARGET_BOTH;
-  }
-
-  int channelNumber = extractJsonInt(payload, "channel", 0);
-
-  if (channelNumber == 1) {
-    return GATE_TARGET_1;
-  }
-
-  if (channelNumber == 2) {
-    return GATE_TARGET_2;
-  }
-
-  if (channelNumber == 3) {
-    return GATE_TARGET_BOTH;
-  }
-
   if (command == "open") {
     Serial.println("[API] Command 'open' without gate target, defaulting to gate 1");
     return GATE_TARGET_1;
@@ -204,64 +224,134 @@ static uint8_t parseGateTargetFromPayload(const String &payload, const String &c
   return GATE_TARGET_NONE;
 }
 
-static void addCommonHeaders(HTTPClient &http) {
-  http.addHeader("X-Device-Id", apiConfig.deviceId);
-  http.addHeader("X-Device-Secret", apiConfig.deviceSecret);
-  http.addHeader("Cache-Control", "no-cache");
-}
+static bool rawHttpRequest(
+  const String &method,
+  const String &url,
+  const String &body,
+  int &httpCode,
+  String &payload
+) {
+  httpCode = 0;
+  payload = "";
 
-static String httpGetPayload(const String &url, int &httpCode) {
-  HTTPClient http;
-  http.setTimeout(API_TIMEOUT_MS);
+  ParsedUrl parsed;
 
-  String payload = "";
-
-  if (url.startsWith("https://")) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, url);
-    addCommonHeaders(http);
-    httpCode = http.GET();
-    payload = http.getString();
-    http.end();
-  } else {
-    WiFiClient client;
-    http.begin(client, url);
-    addCommonHeaders(http);
-    httpCode = http.GET();
-    payload = http.getString();
-    http.end();
+  if (!parseHttpUrl(url, parsed)) {
+    httpCode = -10;
+    return false;
   }
 
-  return payload;
-}
+  WiFiClient client;
+  client.setTimeout(API_TIMEOUT_MS);
 
-static String httpPostPayload(const String &url, const String &body, int &httpCode) {
-  HTTPClient http;
-  http.setTimeout(API_TIMEOUT_MS);
+  Serial.print("[HTTP] Connect ");
+  Serial.print(parsed.host);
+  Serial.print(":");
+  Serial.println(parsed.port);
 
-  String payload = "";
-
-  if (url.startsWith("https://")) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, url);
-    addCommonHeaders(http);
-    http.addHeader("Content-Type", "application/json");
-    httpCode = http.POST(body);
-    payload = http.getString();
-    http.end();
-  } else {
-    WiFiClient client;
-    http.begin(client, url);
-    addCommonHeaders(http);
-    http.addHeader("Content-Type", "application/json");
-    httpCode = http.POST(body);
-    payload = http.getString();
-    http.end();
+  if (!client.connect(parsed.host.c_str(), parsed.port)) {
+    Serial.println("[HTTP] Connect failed");
+    httpCode = -11;
+    client.stop();
+    return false;
   }
 
-  return payload;
+  client.print(method);
+  client.print(" ");
+  client.print(parsed.path);
+  client.println(" HTTP/1.0");
+
+  client.print("Host: ");
+  client.println(parsed.host);
+
+  client.print("X-Device-Id: ");
+  client.println(apiConfig.deviceId);
+
+  client.print("X-Device-Secret: ");
+  client.println(apiConfig.deviceSecret);
+
+  client.println("Cache-Control: no-cache");
+  client.println("Connection: close");
+
+  if (method == "POST") {
+    client.println("Content-Type: application/json");
+
+    client.print("Content-Length: ");
+    client.println(body.length());
+  }
+
+  client.println();
+
+  if (method == "POST") {
+    client.print(body);
+  }
+
+  unsigned long start = millis();
+  String response = "";
+
+  while (client.connected() || client.available()) {
+    while (client.available()) {
+      char c = (char)client.read();
+      response += c;
+
+      // Zabezpieczenie przed przypadkowym zalaniem RAM.
+      if (response.length() > 4096) {
+        Serial.println("[HTTP] Response too large, stopping read");
+        client.stop();
+        break;
+      }
+    }
+
+    if (millis() - start > API_TIMEOUT_MS) {
+      Serial.println("[HTTP] Read timeout");
+      client.stop();
+      break;
+    }
+
+    delay(1);
+  }
+
+  client.stop();
+  delay(20);
+
+  if (response.length() == 0) {
+    Serial.println("[HTTP] Empty response");
+    httpCode = -12;
+    return false;
+  }
+
+  int firstLineEnd = response.indexOf("\r\n");
+
+  if (firstLineEnd < 0) {
+    Serial.println("[HTTP] Invalid response, no status line");
+    httpCode = -13;
+    return false;
+  }
+
+  String statusLine = response.substring(0, firstLineEnd);
+  Serial.print("[HTTP] Status line: ");
+  Serial.println(statusLine);
+
+  int firstSpace = statusLine.indexOf(" ");
+  int secondSpace = statusLine.indexOf(" ", firstSpace + 1);
+
+  if (firstSpace >= 0 && secondSpace > firstSpace) {
+    httpCode = statusLine.substring(firstSpace + 1, secondSpace).toInt();
+  } else {
+    httpCode = -14;
+  }
+
+  int headerEnd = response.indexOf("\r\n\r\n");
+
+  if (headerEnd >= 0) {
+    payload = response.substring(headerEnd + 4);
+  } else {
+    payload = "";
+  }
+
+  payload.trim();
+
+  return httpCode >= 100;
 }
 
 void setupApiClient(const DeviceConfig &config) {
@@ -287,7 +377,9 @@ GateCommand pollGateCommand() {
   Serial.println(url);
 
   int httpCode = 0;
-  String payload = httpGetPayload(url, httpCode);
+  String payload = "";
+
+  rawHttpRequest("GET", url, "", httpCode, payload);
 
   result.httpCode = httpCode;
 
@@ -309,8 +401,6 @@ GateCommand pollGateCommand() {
     return result;
   }
 
-  // Najważniejsza poprawka:
-  // dla command:none kończymy natychmiast, bez dalszego parsowania.
   if (payloadHasCommandNone(payload)) {
     Serial.println("[API] No command");
     return result;
@@ -380,7 +470,9 @@ bool ackGateCommand(const String &commandId, const String &status) {
   Serial.println(body);
 
   int httpCode = 0;
-  String payload = httpPostPayload(url, body, httpCode);
+  String payload = "";
+
+  rawHttpRequest("POST", url, body, httpCode, payload);
 
   Serial.print("[API] ACK HTTP ");
   Serial.println(httpCode);
