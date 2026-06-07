@@ -2,7 +2,7 @@
 import os
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -57,7 +57,7 @@ class CreateDeviceRequest(BaseModel):
 
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.utcnow()
 
 
 def now_iso() -> str:
