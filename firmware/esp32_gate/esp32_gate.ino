@@ -116,7 +116,7 @@ void loop() {
 
       triggerGate(command.target, command.relayTimeMs);
 
-      if (command.commandId.length() > 0) {
+      if (command.commandId[0] != '\0') {
         ackGateCommand(command.commandId, "done");
       }
     } else {

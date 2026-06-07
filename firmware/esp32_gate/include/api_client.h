@@ -8,11 +8,11 @@
 struct GateCommand {
   bool shouldOpen = false;
   uint8_t target = GATE_TARGET_NONE;
-  String commandId = "";
+  char commandId[80] = {0};
   uint32_t relayTimeMs = DEFAULT_GATE_PULSE_MS;
   int httpCode = 0;
 };
 
 void setupApiClient(const DeviceConfig &config);
 GateCommand pollGateCommand();
-bool ackGateCommand(const String &commandId, const String &status);
+bool ackGateCommand(const char *commandId, const char *status);

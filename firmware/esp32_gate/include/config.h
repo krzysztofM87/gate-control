@@ -20,7 +20,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS 20000
 
 // ===== API =====
-#define POLL_INTERVAL_MS 2000
+#define POLL_INTERVAL_MS 5000
 #define API_TIMEOUT_MS 5000
 
 // ===== Portal konfiguracyjny =====

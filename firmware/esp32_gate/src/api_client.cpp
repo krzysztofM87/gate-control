@@ -1,255 +1,156 @@
 ﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "../include/config.h"
 #include "../include/api_client.h"
 #include "../include/gate_control.h"
 
-static DeviceConfig apiConfig;
+static char apiHost[96] = {0};
+static uint16_t apiPort = 80;
+static char apiBasePath[160] = {0};
+static char apiDeviceId[96] = {0};
+static char apiDeviceSecret[160] = {0};
 
-struct ParsedUrl {
-  bool ok = false;
-  String host = "";
-  uint16_t port = 80;
-  String path = "/";
-};
-
-static String normalizeBaseUrl(String url) {
-  url.trim();
-
-  while (url.endsWith("/")) {
-    url.remove(url.length() - 1);
+static void safeCopy(char *dst, size_t dstSize, const char *src) {
+  if (dstSize == 0) {
+    return;
   }
 
-  return url;
-}
-
-static String urlEncode(const String &value) {
-  String encoded = "";
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value.charAt(i);
-
-    if ((c >= 'a' && c <= 'z') ||
-        (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') ||
-        c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += c;
-    } else if (c == ' ') {
-      encoded += "%20";
-    } else {
-      char buf[4];
-      snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)c);
-      encoded += buf;
-    }
+  if (src == nullptr) {
+    dst[0] = '\0';
+    return;
   }
 
-  return encoded;
+  strncpy(dst, src, dstSize - 1);
+  dst[dstSize - 1] = '\0';
 }
 
-static String jsonEscape(const String &value) {
-  String out = value;
-  out.replace("\\", "\\\\");
-  out.replace("\"", "\\\"");
-  out.replace("\n", "\\n");
-  out.replace("\r", "\\r");
-  return out;
-}
-
-static bool parseHttpUrl(const String &url, ParsedUrl &parsed) {
-  if (!url.startsWith("http://")) {
-    Serial.println("[HTTP] Only http:// is supported in stable raw client mode");
+static bool parseServerUrl(const char *url) {
+  if (url == nullptr) {
     return false;
   }
 
-  String rest = url.substring(7);
+  const char *prefix = "http://";
+  size_t prefixLen = strlen(prefix);
 
-  int slashPos = rest.indexOf("/");
-  String hostPort;
-
-  if (slashPos >= 0) {
-    hostPort = rest.substring(0, slashPos);
-    parsed.path = rest.substring(slashPos);
-  } else {
-    hostPort = rest;
-    parsed.path = "/";
-  }
-
-  int colonPos = hostPort.indexOf(":");
-
-  if (colonPos >= 0) {
-    parsed.host = hostPort.substring(0, colonPos);
-    parsed.port = (uint16_t)hostPort.substring(colonPos + 1).toInt();
-
-    if (parsed.port == 0) {
-      parsed.port = 80;
-    }
-  } else {
-    parsed.host = hostPort;
-    parsed.port = 80;
-  }
-
-  parsed.host.trim();
-
-  if (parsed.host.length() == 0) {
+  if (strncmp(url, prefix, prefixLen) != 0) {
+    Serial.println("[API] Only http:// is supported in stable mode");
     return false;
   }
 
-  parsed.ok = true;
+  const char *start = url + prefixLen;
+  const char *slash = strchr(start, '/');
+  const char *colon = strchr(start, ':');
+
+  size_t hostLen = 0;
+
+  if (colon != nullptr && (slash == nullptr || colon < slash)) {
+    hostLen = colon - start;
+    apiPort = (uint16_t)atoi(colon + 1);
+    if (apiPort == 0) {
+      apiPort = 80;
+    }
+  } else {
+    apiPort = 80;
+    hostLen = slash ? (size_t)(slash - start) : strlen(start);
+  }
+
+  if (hostLen == 0 || hostLen >= sizeof(apiHost)) {
+    Serial.println("[API] Invalid host length");
+    return false;
+  }
+
+  memcpy(apiHost, start, hostLen);
+  apiHost[hostLen] = '\0';
+
+  if (slash != nullptr) {
+    safeCopy(apiBasePath, sizeof(apiBasePath), slash);
+
+    size_t len = strlen(apiBasePath);
+    while (len > 0 && apiBasePath[len - 1] == '/') {
+      apiBasePath[len - 1] = '\0';
+      len--;
+    }
+  } else {
+    apiBasePath[0] = '\0';
+  }
+
   return true;
 }
 
-static String extractJsonString(const String &json, const String &key) {
-  String pattern = "\"" + key + "\"";
-  int keyPos = json.indexOf(pattern);
+static bool readHttpLine(WiFiClient &client, char *line, size_t lineSize, unsigned long timeoutMs) {
+  size_t pos = 0;
+  unsigned long start = millis();
 
-  if (keyPos < 0) {
-    return "";
+  if (lineSize == 0) {
+    return false;
   }
 
-  int colonPos = json.indexOf(":", keyPos + pattern.length());
+  while (millis() - start < timeoutMs) {
+    while (client.available()) {
+      char c = (char)client.read();
 
-  if (colonPos < 0) {
-    return "";
-  }
+      if (c == '\r') {
+        continue;
+      }
 
-  int firstQuote = json.indexOf("\"", colonPos + 1);
+      if (c == '\n') {
+        line[pos] = '\0';
+        return true;
+      }
 
-  if (firstQuote < 0) {
-    return "";
-  }
+      if (pos < lineSize - 1) {
+        line[pos++] = c;
+      }
+    }
 
-  int secondQuote = json.indexOf("\"", firstQuote + 1);
-
-  if (secondQuote < 0) {
-    return "";
-  }
-
-  return json.substring(firstQuote + 1, secondQuote);
-}
-
-static int extractJsonInt(const String &json, const String &key, int defaultValue) {
-  String pattern = "\"" + key + "\"";
-  int keyPos = json.indexOf(pattern);
-
-  if (keyPos < 0) {
-    return defaultValue;
-  }
-
-  int colonPos = json.indexOf(":", keyPos + pattern.length());
-
-  if (colonPos < 0) {
-    return defaultValue;
-  }
-
-  int start = colonPos + 1;
-
-  while (start < (int)json.length()) {
-    char c = json.charAt(start);
-    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+    if (!client.connected() && !client.available()) {
       break;
     }
-    start++;
+
+    delay(1);
   }
 
-  int end = start;
-
-  while (end < (int)json.length()) {
-    char c = json.charAt(end);
-    if (c < '0' || c > '9') {
-      break;
-    }
-    end++;
-  }
-
-  if (end == start) {
-    return defaultValue;
-  }
-
-  return json.substring(start, end).toInt();
+  line[pos] = '\0';
+  return pos > 0;
 }
 
-static bool payloadHasCommandNone(const String &payload) {
-  return payload.indexOf("\"command\":\"none\"") >= 0 ||
-         payload.indexOf("\"command\": \"none\"") >= 0;
-}
+static int parseStatusCode(const char *statusLine) {
+  const char *space1 = strchr(statusLine, ' ');
 
-static uint8_t parseGateTargetFromPayload(const String &payload, const String &command) {
-  if (command == "open_1") {
-    return GATE_TARGET_1;
+  if (space1 == nullptr) {
+    return -1;
   }
 
-  if (command == "open_2") {
-    return GATE_TARGET_2;
-  }
-
-  if (command == "open_both") {
-    return GATE_TARGET_BOTH;
-  }
-
-  String gateText = extractJsonString(payload, "gate");
-
-  if (gateText == "1" || gateText == "gate1" || gateText == "left") {
-    return GATE_TARGET_1;
-  }
-
-  if (gateText == "2" || gateText == "gate2" || gateText == "right") {
-    return GATE_TARGET_2;
-  }
-
-  if (gateText == "both") {
-    return GATE_TARGET_BOTH;
-  }
-
-  int gateNumber = extractJsonInt(payload, "gate", 0);
-
-  if (gateNumber == 1) {
-    return GATE_TARGET_1;
-  }
-
-  if (gateNumber == 2) {
-    return GATE_TARGET_2;
-  }
-
-  if (gateNumber == 3) {
-    return GATE_TARGET_BOTH;
-  }
-
-  if (command == "open") {
-    Serial.println("[API] Command 'open' without gate target, defaulting to gate 1");
-    return GATE_TARGET_1;
-  }
-
-  return GATE_TARGET_NONE;
+  return atoi(space1 + 1);
 }
 
 static bool rawHttpRequest(
-  const String &method,
-  const String &url,
-  const String &body,
+  const char *method,
+  const char *path,
+  const char *body,
   int &httpCode,
-  String &payload
+  char *payload,
+  size_t payloadSize
 ) {
   httpCode = 0;
-  payload = "";
 
-  ParsedUrl parsed;
-
-  if (!parseHttpUrl(url, parsed)) {
-    httpCode = -10;
-    return false;
+  if (payloadSize > 0) {
+    payload[0] = '\0';
   }
 
   WiFiClient client;
   client.setTimeout(API_TIMEOUT_MS);
 
   Serial.print("[HTTP] Connect ");
-  Serial.print(parsed.host);
+  Serial.print(apiHost);
   Serial.print(":");
-  Serial.println(parsed.port);
+  Serial.println(apiPort);
 
-  if (!client.connect(parsed.host.c_str(), parsed.port)) {
+  if (!client.connect(apiHost, apiPort)) {
     Serial.println("[HTTP] Connect failed");
     httpCode = -11;
     client.stop();
@@ -258,108 +159,207 @@ static bool rawHttpRequest(
 
   client.print(method);
   client.print(" ");
-  client.print(parsed.path);
+  client.print(path);
   client.println(" HTTP/1.0");
 
   client.print("Host: ");
-  client.println(parsed.host);
+  client.println(apiHost);
 
   client.print("X-Device-Id: ");
-  client.println(apiConfig.deviceId);
+  client.println(apiDeviceId);
 
   client.print("X-Device-Secret: ");
-  client.println(apiConfig.deviceSecret);
+  client.println(apiDeviceSecret);
 
   client.println("Cache-Control: no-cache");
   client.println("Connection: close");
 
-  if (method == "POST") {
+  if (strcmp(method, "POST") == 0) {
     client.println("Content-Type: application/json");
-
     client.print("Content-Length: ");
-    client.println(body.length());
+    client.println(strlen(body));
   }
 
   client.println();
 
-  if (method == "POST") {
+  if (strcmp(method, "POST") == 0) {
     client.print(body);
   }
 
-  unsigned long start = millis();
-  String response = "";
+  char line[256];
 
-  while (client.connected() || client.available()) {
+  if (!readHttpLine(client, line, sizeof(line), API_TIMEOUT_MS)) {
+    Serial.println("[HTTP] No status line");
+    httpCode = -12;
+    client.stop();
+    return false;
+  }
+
+  Serial.print("[HTTP] Status line: ");
+  Serial.println(line);
+
+  httpCode = parseStatusCode(line);
+
+  while (readHttpLine(client, line, sizeof(line), API_TIMEOUT_MS)) {
+    if (line[0] == '\0') {
+      break;
+    }
+  }
+
+  size_t pos = 0;
+  unsigned long start = millis();
+
+  while (millis() - start < API_TIMEOUT_MS) {
     while (client.available()) {
       char c = (char)client.read();
-      response += c;
 
-      // Zabezpieczenie przed przypadkowym zalaniem RAM.
-      if (response.length() > 4096) {
-        Serial.println("[HTTP] Response too large, stopping read");
-        client.stop();
-        break;
+      if (pos < payloadSize - 1) {
+        payload[pos++] = c;
       }
     }
 
-    if (millis() - start > API_TIMEOUT_MS) {
-      Serial.println("[HTTP] Read timeout");
-      client.stop();
+    if (!client.connected() && !client.available()) {
       break;
     }
 
     delay(1);
   }
 
+  if (payloadSize > 0) {
+    payload[pos] = '\0';
+  }
+
   client.stop();
-  delay(20);
-
-  if (response.length() == 0) {
-    Serial.println("[HTTP] Empty response");
-    httpCode = -12;
-    return false;
-  }
-
-  int firstLineEnd = response.indexOf("\r\n");
-
-  if (firstLineEnd < 0) {
-    Serial.println("[HTTP] Invalid response, no status line");
-    httpCode = -13;
-    return false;
-  }
-
-  String statusLine = response.substring(0, firstLineEnd);
-  Serial.print("[HTTP] Status line: ");
-  Serial.println(statusLine);
-
-  int firstSpace = statusLine.indexOf(" ");
-  int secondSpace = statusLine.indexOf(" ", firstSpace + 1);
-
-  if (firstSpace >= 0 && secondSpace > firstSpace) {
-    httpCode = statusLine.substring(firstSpace + 1, secondSpace).toInt();
-  } else {
-    httpCode = -14;
-  }
-
-  int headerEnd = response.indexOf("\r\n\r\n");
-
-  if (headerEnd >= 0) {
-    payload = response.substring(headerEnd + 4);
-  } else {
-    payload = "";
-  }
-
-  payload.trim();
+  delay(50);
 
   return httpCode >= 100;
 }
 
+static bool extractJsonString(const char *json, const char *key, char *out, size_t outSize) {
+  if (outSize == 0) {
+    return false;
+  }
+
+  out[0] = '\0';
+
+  char pattern[64];
+  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+  const char *keyPos = strstr(json, pattern);
+  if (keyPos == nullptr) {
+    return false;
+  }
+
+  const char *colon = strchr(keyPos + strlen(pattern), ':');
+  if (colon == nullptr) {
+    return false;
+  }
+
+  const char *firstQuote = strchr(colon + 1, '"');
+  if (firstQuote == nullptr) {
+    return false;
+  }
+
+  const char *secondQuote = strchr(firstQuote + 1, '"');
+  if (secondQuote == nullptr) {
+    return false;
+  }
+
+  size_t len = secondQuote - firstQuote - 1;
+
+  if (len >= outSize) {
+    len = outSize - 1;
+  }
+
+  memcpy(out, firstQuote + 1, len);
+  out[len] = '\0';
+
+  return true;
+}
+
+static int extractJsonInt(const char *json, const char *key, int defaultValue) {
+  char pattern[64];
+  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+  const char *keyPos = strstr(json, pattern);
+  if (keyPos == nullptr) {
+    return defaultValue;
+  }
+
+  const char *colon = strchr(keyPos + strlen(pattern), ':');
+  if (colon == nullptr) {
+    return defaultValue;
+  }
+
+  return atoi(colon + 1);
+}
+
+static uint8_t targetFromCommand(const char *command) {
+  if (strcmp(command, "open_1") == 0) {
+    return GATE_TARGET_1;
+  }
+
+  if (strcmp(command, "open_2") == 0) {
+    return GATE_TARGET_2;
+  }
+
+  if (strcmp(command, "open_both") == 0) {
+    return GATE_TARGET_BOTH;
+  }
+
+  if (strcmp(command, "open") == 0) {
+    Serial.println("[API] Command 'open' without target, defaulting to gate 1");
+    return GATE_TARGET_1;
+  }
+
+  return GATE_TARGET_NONE;
+}
+
+static void buildPollPath(char *path, size_t pathSize) {
+  snprintf(
+    path,
+    pathSize,
+    "%s/api/device/poll?device_id=%s",
+    apiBasePath,
+    apiDeviceId
+  );
+}
+
+static void buildAckPath(char *path, size_t pathSize) {
+  snprintf(
+    path,
+    pathSize,
+    "%s/api/device/ack",
+    apiBasePath
+  );
+}
+
 void setupApiClient(const DeviceConfig &config) {
-  apiConfig = config;
-  apiConfig.serverUrl = normalizeBaseUrl(apiConfig.serverUrl);
+  safeCopy(apiDeviceId, sizeof(apiDeviceId), config.deviceId.c_str());
+  safeCopy(apiDeviceSecret, sizeof(apiDeviceSecret), config.deviceSecret.c_str());
+
+  String serverUrl = config.serverUrl;
+  serverUrl.trim();
+
+  while (serverUrl.endsWith("/")) {
+    serverUrl.remove(serverUrl.length() - 1);
+  }
 
   Serial.print("[API] Server URL: ");
-  Serial.println(apiConfig.serverUrl);
+  Serial.println(serverUrl);
+
+  if (!parseServerUrl(serverUrl.c_str())) {
+    Serial.println("[API] Server URL parse failed");
+  }
+
+  Serial.print("[API] Host: ");
+  Serial.println(apiHost);
+
+  Serial.print("[API] Port: ");
+  Serial.println(apiPort);
+
+  Serial.print("[API] Base path: ");
+  Serial.println(apiBasePath);
 }
 
 GateCommand pollGateCommand() {
@@ -371,29 +371,26 @@ GateCommand pollGateCommand() {
     return result;
   }
 
-  String url = apiConfig.serverUrl + "/api/device/poll?device_id=" + urlEncode(apiConfig.deviceId);
+  char path[240];
+  char payload[1024];
+
+  buildPollPath(path, sizeof(path));
 
   Serial.print("[API] Poll ");
-  Serial.println(url);
+  Serial.println(path);
 
   int httpCode = 0;
-  String payload = "";
 
-  rawHttpRequest("GET", url, "", httpCode, payload);
+  rawHttpRequest("GET", path, "", httpCode, payload, sizeof(payload));
 
   result.httpCode = httpCode;
 
   Serial.print("[API] HTTP ");
   Serial.println(httpCode);
 
-  if (payload.length() > 0) {
+  if (payload[0] != '\0') {
     Serial.print("[API] Payload: ");
     Serial.println(payload);
-  }
-
-  if (httpCode == 204) {
-    Serial.println("[API] No content");
-    return result;
   }
 
   if (httpCode < 200 || httpCode >= 300) {
@@ -401,52 +398,59 @@ GateCommand pollGateCommand() {
     return result;
   }
 
-  if (payloadHasCommandNone(payload)) {
-    Serial.println("[API] No command");
+  char command[32];
+
+  if (!extractJsonString(payload, "command", command, sizeof(command))) {
+    Serial.println("[API] Missing command field");
     return result;
   }
-
-  String command = extractJsonString(payload, "command");
 
   Serial.print("[API] Parsed command: ");
   Serial.println(command);
 
-  if (command == "open" || command == "open_1" || command == "open_2" || command == "open_both") {
-    uint8_t target = parseGateTargetFromPayload(payload, command);
-
-    if (target != GATE_TARGET_NONE) {
-      result.shouldOpen = true;
-      result.target = target;
-      result.commandId = extractJsonString(payload, "command_id");
-
-      int relayMs = extractJsonInt(payload, "relay_time_ms", DEFAULT_GATE_PULSE_MS);
-
-      if (relayMs < MIN_GATE_PULSE_MS) {
-        relayMs = MIN_GATE_PULSE_MS;
-      }
-
-      if (relayMs > MAX_GATE_PULSE_MS) {
-        relayMs = MAX_GATE_PULSE_MS;
-      }
-
-      result.relayTimeMs = relayMs;
-
-      Serial.print("[API] Command target: ");
-      Serial.println(result.target);
-
-      Serial.print("[API] Command ID: ");
-      Serial.println(result.commandId);
-
-      Serial.print("[API] Relay ms: ");
-      Serial.println(result.relayTimeMs);
-    }
+  if (strcmp(command, "none") == 0) {
+    Serial.println("[API] No command");
+    return result;
   }
+
+  uint8_t target = targetFromCommand(command);
+
+  if (target == GATE_TARGET_NONE) {
+    Serial.println("[API] Unknown command");
+    return result;
+  }
+
+  result.shouldOpen = true;
+  result.target = target;
+
+  extractJsonString(payload, "command_id", result.commandId, sizeof(result.commandId));
+
+  int relayMs = extractJsonInt(payload, "relay_time_ms", DEFAULT_GATE_PULSE_MS);
+
+  if (relayMs < MIN_GATE_PULSE_MS) {
+    relayMs = MIN_GATE_PULSE_MS;
+  }
+
+  if (relayMs > MAX_GATE_PULSE_MS) {
+    relayMs = MAX_GATE_PULSE_MS;
+  }
+
+  result.relayTimeMs = relayMs;
+
+  Serial.print("[API] Command target: ");
+  Serial.println(result.target);
+
+  Serial.print("[API] Command ID: ");
+  Serial.println(result.commandId);
+
+  Serial.print("[API] Relay ms: ");
+  Serial.println(result.relayTimeMs);
 
   return result;
 }
 
-bool ackGateCommand(const String &commandId, const String &status) {
-  if (commandId.length() == 0) {
+bool ackGateCommand(const char *commandId, const char *status) {
+  if (commandId == nullptr || commandId[0] == '\0') {
     Serial.println("[API] ACK skipped, missing command_id");
     return false;
   }
@@ -456,28 +460,34 @@ bool ackGateCommand(const String &commandId, const String &status) {
     return false;
   }
 
-  String url = apiConfig.serverUrl + "/api/device/ack";
+  char path[220];
+  char body[260];
+  char payload[1024];
 
-  String body = "{";
-  body += "\"device_id\":\"" + jsonEscape(apiConfig.deviceId) + "\",";
-  body += "\"command_id\":\"" + jsonEscape(commandId) + "\",";
-  body += "\"status\":\"" + jsonEscape(status) + "\"";
-  body += "}";
+  buildAckPath(path, sizeof(path));
+
+  snprintf(
+    body,
+    sizeof(body),
+    "{\"device_id\":\"%s\",\"command_id\":\"%s\",\"status\":\"%s\"}",
+    apiDeviceId,
+    commandId,
+    status
+  );
 
   Serial.print("[API] ACK ");
-  Serial.println(url);
+  Serial.println(path);
   Serial.print("[API] ACK body ");
   Serial.println(body);
 
   int httpCode = 0;
-  String payload = "";
 
-  rawHttpRequest("POST", url, body, httpCode, payload);
+  rawHttpRequest("POST", path, body, httpCode, payload, sizeof(payload));
 
   Serial.print("[API] ACK HTTP ");
   Serial.println(httpCode);
 
-  if (payload.length() > 0) {
+  if (payload[0] != '\0') {
     Serial.print("[API] ACK payload: ");
     Serial.println(payload);
   }
