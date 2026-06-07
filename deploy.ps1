@@ -1,7 +1,6 @@
 Write-Host "Gate Control deploy" -ForegroundColor Cyan
 Write-Host "===================" -ForegroundColor Cyan
 
-# Go to script directory
 Set-Location $PSScriptRoot
 
 Write-Host ""
@@ -75,7 +74,10 @@ else
 fi
 '@
 
-ssh gate-vps $remoteCommand
+# Convert Windows CRLF to Linux LF before sending to bash.
+$remoteCommand = $remoteCommand -replace "`r`n", "`n"
+
+$remoteCommand | ssh gate-vps "bash -s"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "VPS update failed." -ForegroundColor Red
