@@ -26,7 +26,10 @@ static String urlEncode(const String &value) {
   for (size_t i = 0; i < value.length(); i++) {
     char c = value.charAt(i);
 
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') {
       encoded += c;
     } else if (c == ' ') {
       encoded += "%20";
@@ -94,13 +97,21 @@ static int extractJsonInt(const String &json, const String &key, int defaultValu
 
   int start = colonPos + 1;
 
-  while (start < (int)json.length() && isspace(json.charAt(start))) {
+  while (start < (int)json.length()) {
+    char c = json.charAt(start);
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+      break;
+    }
     start++;
   }
 
   int end = start;
 
-  while (end < (int)json.length() && isdigit(json.charAt(end))) {
+  while (end < (int)json.length()) {
+    char c = json.charAt(end);
+    if (c < '0' || c > '9') {
+      break;
+    }
     end++;
   }
 
@@ -109,6 +120,11 @@ static int extractJsonInt(const String &json, const String &key, int defaultValu
   }
 
   return json.substring(start, end).toInt();
+}
+
+static bool payloadHasCommandNone(const String &payload) {
+  return payload.indexOf("\"command\":\"none\"") >= 0 ||
+         payload.indexOf("\"command\": \"none\"") >= 0;
 }
 
 static uint8_t parseGateTargetFromPayload(const String &payload, const String &command) {
@@ -194,6 +210,60 @@ static void addCommonHeaders(HTTPClient &http) {
   http.addHeader("Cache-Control", "no-cache");
 }
 
+static String httpGetPayload(const String &url, int &httpCode) {
+  HTTPClient http;
+  http.setTimeout(API_TIMEOUT_MS);
+
+  String payload = "";
+
+  if (url.startsWith("https://")) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, url);
+    addCommonHeaders(http);
+    httpCode = http.GET();
+    payload = http.getString();
+    http.end();
+  } else {
+    WiFiClient client;
+    http.begin(client, url);
+    addCommonHeaders(http);
+    httpCode = http.GET();
+    payload = http.getString();
+    http.end();
+  }
+
+  return payload;
+}
+
+static String httpPostPayload(const String &url, const String &body, int &httpCode) {
+  HTTPClient http;
+  http.setTimeout(API_TIMEOUT_MS);
+
+  String payload = "";
+
+  if (url.startsWith("https://")) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, url);
+    addCommonHeaders(http);
+    http.addHeader("Content-Type", "application/json");
+    httpCode = http.POST(body);
+    payload = http.getString();
+    http.end();
+  } else {
+    WiFiClient client;
+    http.begin(client, url);
+    addCommonHeaders(http);
+    http.addHeader("Content-Type", "application/json");
+    httpCode = http.POST(body);
+    payload = http.getString();
+    http.end();
+  }
+
+  return payload;
+}
+
 void setupApiClient(const DeviceConfig &config) {
   apiConfig = config;
   apiConfig.serverUrl = normalizeBaseUrl(apiConfig.serverUrl);
@@ -213,34 +283,13 @@ GateCommand pollGateCommand() {
 
   String url = apiConfig.serverUrl + "/api/device/poll?device_id=" + urlEncode(apiConfig.deviceId);
 
-  HTTPClient http;
-  http.setTimeout(API_TIMEOUT_MS);
-
-  int httpCode = 0;
-  String payload = "";
-
   Serial.print("[API] Poll ");
   Serial.println(url);
 
-  if (url.startsWith("https://")) {
-    WiFiClientSecure client;
-    client.setInsecure(); // MVP. Produkcyjnie lepiej dodać CA/pinning certyfikatu.
-    http.begin(client, url);
-    addCommonHeaders(http);
-    httpCode = http.GET();
-    payload = http.getString();
-    http.end();
-  } else {
-    WiFiClient client;
-    http.begin(client, url);
-    addCommonHeaders(http);
-    httpCode = http.GET();
-    payload = http.getString();
-    http.end();
-  }
+  int httpCode = 0;
+  String payload = httpGetPayload(url, httpCode);
 
   result.httpCode = httpCode;
-  result.raw = payload;
 
   Serial.print("[API] HTTP ");
   Serial.println(httpCode);
@@ -251,14 +300,26 @@ GateCommand pollGateCommand() {
   }
 
   if (httpCode == 204) {
+    Serial.println("[API] No content");
     return result;
   }
 
   if (httpCode < 200 || httpCode >= 300) {
+    Serial.println("[API] Non-2xx response, ignored");
+    return result;
+  }
+
+  // Najważniejsza poprawka:
+  // dla command:none kończymy natychmiast, bez dalszego parsowania.
+  if (payloadHasCommandNone(payload)) {
+    Serial.println("[API] No command");
     return result;
   }
 
   String command = extractJsonString(payload, "command");
+
+  Serial.print("[API] Parsed command: ");
+  Serial.println(command);
 
   if (command == "open" || command == "open_1" || command == "open_2" || command == "open_both") {
     uint8_t target = parseGateTargetFromPayload(payload, command);
@@ -279,6 +340,15 @@ GateCommand pollGateCommand() {
       }
 
       result.relayTimeMs = relayMs;
+
+      Serial.print("[API] Command target: ");
+      Serial.println(result.target);
+
+      Serial.print("[API] Command ID: ");
+      Serial.println(result.commandId);
+
+      Serial.print("[API] Relay ms: ");
+      Serial.println(result.relayTimeMs);
     }
   }
 
@@ -304,35 +374,13 @@ bool ackGateCommand(const String &commandId, const String &status) {
   body += "\"status\":\"" + jsonEscape(status) + "\"";
   body += "}";
 
-  HTTPClient http;
-  http.setTimeout(API_TIMEOUT_MS);
-
-  int httpCode = 0;
-  String payload = "";
-
   Serial.print("[API] ACK ");
   Serial.println(url);
   Serial.print("[API] ACK body ");
   Serial.println(body);
 
-  if (url.startsWith("https://")) {
-    WiFiClientSecure client;
-    client.setInsecure(); // MVP. Produkcyjnie lepiej dodać CA/pinning certyfikatu.
-    http.begin(client, url);
-    addCommonHeaders(http);
-    http.addHeader("Content-Type", "application/json");
-    httpCode = http.POST(body);
-    payload = http.getString();
-    http.end();
-  } else {
-    WiFiClient client;
-    http.begin(client, url);
-    addCommonHeaders(http);
-    http.addHeader("Content-Type", "application/json");
-    httpCode = http.POST(body);
-    payload = http.getString();
-    http.end();
-  }
+  int httpCode = 0;
+  String payload = httpPostPayload(url, body, httpCode);
 
   Serial.print("[API] ACK HTTP ");
   Serial.println(httpCode);

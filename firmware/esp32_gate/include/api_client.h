@@ -11,7 +11,6 @@ struct GateCommand {
   String commandId = "";
   uint32_t relayTimeMs = DEFAULT_GATE_PULSE_MS;
   int httpCode = 0;
-  String raw = "";
 };
 
 void setupApiClient(const DeviceConfig &config);
