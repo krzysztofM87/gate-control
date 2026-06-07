@@ -35,7 +35,7 @@ static void printStartupInfo() {
 
 void setup() {
   Serial.begin(115200);
-  delay(400);
+  delay(800);
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
 
@@ -46,25 +46,27 @@ void setup() {
 
   bool configButtonPressed = isBootButtonPressed();
 
-  if (configButtonPressed) {
-    Serial.println("[BOOT] BOOT pressed");
-  }
-
   bool configLoaded = loadDeviceConfig(deviceConfig);
   setupTerminalConfig(&deviceConfig);
 
-  if (configButtonPressed || !configLoaded || !deviceConfig.isComplete()) {
-    Serial.println("[BOOT] Missing config or BOOT pressed");
+  Serial.println("[BOOT] Terminal config window always enabled");
+  Serial.println("[BOOT] Type 'terminal' or 'help' within 10 seconds to enter config.");
+  Serial.println("[BOOT] If you do nothing, device continues normal startup.");
 
-    runTerminalConfigWindow(deviceConfig, 10000);
+  runTerminalConfigWindow(deviceConfig, 10000);
 
-    configLoaded = loadDeviceConfig(deviceConfig);
-    setupTerminalConfig(&deviceConfig);
+  configLoaded = loadDeviceConfig(deviceConfig);
+  setupTerminalConfig(&deviceConfig);
 
-    if (!configLoaded || !deviceConfig.isComplete()) {
-      Serial.println("[BOOT] Config still incomplete, entering config portal");
-      runConfigPortal(deviceConfig);
-    }
+  if (configButtonPressed) {
+    Serial.println("[BOOT] BOOT button detected after sketch start");
+    Serial.println("[BOOT] Entering config portal");
+    runConfigPortal(deviceConfig);
+  }
+
+  if (!configLoaded || !deviceConfig.isComplete()) {
+    Serial.println("[BOOT] Config incomplete, entering config portal");
+    runConfigPortal(deviceConfig);
   }
 
   bool wifiOk = connectToConfiguredWiFi(deviceConfig);
@@ -72,6 +74,7 @@ void setup() {
   if (!wifiOk) {
     Serial.println("[BOOT] WiFi failed");
 
+    Serial.println("[BOOT] You have 10 seconds to fix config by terminal.");
     runTerminalConfigWindow(deviceConfig, 10000);
 
     configLoaded = loadDeviceConfig(deviceConfig);
