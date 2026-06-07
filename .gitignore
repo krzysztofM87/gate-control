@@ -1,0 +1,31 @@
+﻿# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment / secrets
+.env
+*.env
+server/.env
+
+# SQLite / runtime data
+*.db
+server/data/*
+!server/data/.gitkeep
+
+# Docker / logs
+*.log
+
+# Arduino / ESP32 build files
+build/
+*.elf
+*.bin
+*.hex
+
+# VS Code
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
