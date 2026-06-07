@@ -1,0 +1,13 @@
+services:
+  gate-server:
+    build:
+      context: ./server
+    container_name: gate-server
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    volumes:
+      - ./server/data:/app/data
+    ports:
+      - "127.0.0.1:8010:8000"
+      

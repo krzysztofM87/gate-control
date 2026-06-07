@@ -29,3 +29,9 @@ build/
 # System files
 .DS_Store
 Thumbs.db
+.env
+server/.env
+server/data/
+__pycache__/
+.venv/
+node_modules/
