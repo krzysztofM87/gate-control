@@ -42,7 +42,7 @@ $remoteCommand = @'
 #!/usr/bin/env bash
 set -e
 
-cd /opt/gate-control
+cd cd /opt/gate-control/server
 
 echo "Current directory:"
 pwd
