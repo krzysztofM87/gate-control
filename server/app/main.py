@@ -4,13 +4,15 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import get_db, init_db, SessionLocal
+from app.database import get_db, init_db, SessionLocal, engine
 from app.models import AccessToken, Command, CommandLog, Device
 
 
@@ -25,6 +27,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 COMMAND_RELAY_TIME_MS = int(os.getenv("COMMAND_RELAY_TIME_MS", "700"))
 TOKEN_DEFAULT_VALID_HOURS = int(os.getenv("TOKEN_DEFAULT_VALID_HOURS", "72"))
 OPEN_COOLDOWN_SECONDS = int(os.getenv("OPEN_COOLDOWN_SECONDS", "5"))
+APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Europe/Warsaw"))
 
 # SQLite ma valid_to jako NOT NULL, więc dla bezterminowych pilotów
 # trzymamy technicznie daleką datę i flagę valid_forever.
@@ -508,9 +511,28 @@ def render_page(title: str, body: str) -> str:
 """
 
 
+
+def run_schema_migrations() -> None:
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(access_tokens)")).mappings().all()
+        columns = {row["name"] for row in rows}
+
+        migrations = {
+            "pilot_title": "ALTER TABLE access_tokens ADD COLUMN pilot_title VARCHAR(255)",
+            "button_1_label": "ALTER TABLE access_tokens ADD COLUMN button_1_label VARCHAR(120)",
+            "button_2_label": "ALTER TABLE access_tokens ADD COLUMN button_2_label VARCHAR(120)",
+            "button_both_label": "ALTER TABLE access_tokens ADD COLUMN button_both_label VARCHAR(120)",
+            "valid_forever": "ALTER TABLE access_tokens ADD COLUMN valid_forever BOOLEAN DEFAULT 0",
+        }
+
+        for name, sql in migrations.items():
+            if name not in columns:
+                conn.execute(text(sql))
+
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    run_schema_migrations()
 
     db = SessionLocal()
 
@@ -820,6 +842,10 @@ def admin_create_token(
     token = AccessToken(
         token_value=token_value,
         label=payload.label,
+        pilot_title=payload.pilot_title,
+        button_1_label=payload.button_1_label,
+        button_2_label=payload.button_2_label,
+        button_both_label=payload.button_both_label,
         device_id=device.device_id,
         gate_target=gate_target,
         status="active",
@@ -850,7 +876,7 @@ def admin_create_token(
     return {
         "status": "ok",
         "token": token.token_value,
-        "public_url": public_url(f"/brama/{token.token_value}"),
+        "public_url": public_url(f"/pilot/{token.token_value}"),
         "device_id": token.device_id,
         "gate_target": token.gate_target,
         "valid_from": token.valid_from.isoformat(),
@@ -881,7 +907,7 @@ def admin_list_tokens(
                 "id": token.id,
                 "label": token.label,
                 "token": token.token_value,
-                "public_url": public_url(f"/brama/{token.token_value}"),
+                "public_url": public_url(f"/pilot/{token.token_value}"),
                 "device_id": token.device_id,
                 "gate_target": token.gate_target,
                 "status": token.status,
@@ -983,7 +1009,7 @@ def token_valid_to_text(token: AccessToken) -> str:
     if token.valid_to is None:
         return "brak"
 
-    return token.valid_to.isoformat()
+    return format_dt(token.valid_to)
 
 # ===== Admin panel HTML =====
 
@@ -1243,8 +1269,8 @@ def admin_panel(
             <td><code>{html.escape(command.command)}</code></td>
             <td>{html.escape(command.status)}</td>
             <td>{command.delivered_count}</td>
-            <td>{html.escape(command.created_at.isoformat())}</td>
-            <td>{html.escape(command.ack_at.isoformat()) if command.ack_at else ""}</td>
+            <td>{html.escape(format_dt(command.created_at))}</td>
+            <td>{html.escape(format_dt(command.ack_at)) if command.ack_at else ""}</td>
         </tr>
         """
 
@@ -2179,7 +2205,7 @@ def admin_panel_devices(
             <td>{status_text}</td>
             <td>{counts["tokens"]}</td>
             <td>{counts["pending_or_sent_commands"]}</td>
-            <td>{html.escape(device.last_seen_at.isoformat()) if device.last_seen_at else ""}</td>
+            <td>{html.escape(format_dt(device.last_seen_at)) if device.last_seen_at else ""}</td>
             <td>
                 <a href="{public_path(f'/admin-panel/devices/{device.device_id}/edit')}">edytuj</a>
                 <br>
@@ -2354,7 +2380,7 @@ def admin_panel_edit_device(
             Tokeny przypisane: {counts["tokens"]}<br>
             Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
             Wszystkie komendy historycznie: {counts["all_commands"]}<br>
-            Ostatnio widziane: {html.escape(device.last_seen_at.isoformat()) if device.last_seen_at else ""}
+            Ostatnio widziane: {html.escape(format_dt(device.last_seen_at)) if device.last_seen_at else ""}
         </p>
 
         <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/update')}">
@@ -2611,6 +2637,7 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
 
 
 
