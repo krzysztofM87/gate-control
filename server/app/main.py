@@ -230,6 +230,8 @@ def authenticate_device(
             raise HTTPException(status_code=401, detail="Invalid device secret")
 
     device.last_seen_at = now_utc()
+    db.commit()
+    # last_seen_at committed immediately
 
     return device
 
@@ -1963,12 +1965,14 @@ def device_or_404(db: Session, device_id: str) -> Device:
 
 def device_counts(db: Session, device_id: str) -> dict:
     tokens_count = db.query(AccessToken).filter(AccessToken.device_id == device_id).count()
+
     pending_count = (
         db.query(Command)
         .filter(Command.device_id == device_id)
         .filter(Command.status.in_(["pending", "sent"]))
         .count()
     )
+
     all_commands_count = db.query(Command).filter(Command.device_id == device_id).count()
 
     return {
@@ -1997,11 +2001,11 @@ def admin_list_devices(
                 "id": device.id,
                 "device_id": device.device_id,
                 "name": device.name,
+                "secret": device.secret,
                 "is_active": device.is_active,
                 "created_at": device.created_at.isoformat() if device.created_at else None,
                 "updated_at": device.updated_at.isoformat() if device.updated_at else None,
                 "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
-                "has_secret": bool(device.secret),
                 "counts": device_counts(db, device.device_id),
             }
             for device in devices
@@ -2031,11 +2035,14 @@ def admin_panel_devices(
         status_text = "aktywne" if device.is_active else "wyłączone"
         toggle_text = "Dezaktywuj" if device.is_active else "Aktywuj"
 
+        secret_text = device.secret or ""
+
         rows += f"""
         <tr>
             <td>{device.id}</td>
             <td><code>{html.escape(device.device_id)}</code></td>
             <td>{html.escape(device.name or "")}</td>
+            <td><code>{html.escape(secret_text)}</code></td>
             <td>{status_text}</td>
             <td>{counts["tokens"]}</td>
             <td>{counts["pending_or_sent_commands"]}</td>
@@ -2053,7 +2060,7 @@ def admin_panel_devices(
         """
 
     if not rows:
-        rows = "<tr><td colspan='8'>Brak urządzeń.</td></tr>"
+        rows = "<tr><td colspan='9'>Brak urządzeń.</td></tr>"
 
     body = f"""
     <div class="top">
@@ -2065,7 +2072,7 @@ def admin_panel_devices(
         <h2>Dodaj urządzenie</h2>
         <p class="muted">
             Każde ESP32 powinno mieć własny identyfikator i sekret.
-            Tego sekretu używasz potem w konfiguracji terminalowej ESP32.
+            Sekret jest wyświetlany w panelu, bo tego teraz potrzebujemy. Tak, po HTTP to nadal nie jest sejf pancerny.
         </p>
 
         <form method="post" action="{public_path('/admin-panel/devices')}">
@@ -2090,6 +2097,7 @@ def admin_panel_devices(
                     <th>ID</th>
                     <th>Device ID</th>
                     <th>Nazwa</th>
+                    <th>Sekret</th>
                     <th>Status</th>
                     <th>Tokeny</th>
                     <th>Komendy oczekujące/wysłane</th>
@@ -2167,10 +2175,6 @@ async def admin_panel_save_device(
         <p>Sekret urządzenia:</p>
         <p><code>{html.escape(secret)}</code></p>
 
-        <p class="muted">
-            Skopiuj sekret teraz. Jeśli był wygenerowany automatycznie, traktuj go jak hasło.
-        </p>
-
         <h2>Konfiguracja ESP32 przez terminal</h2>
         <p><code>device {html.escape(device.device_id)}|{html.escape(secret)}</code></p>
         <p><code>server http://tools.malmaz.com/gate-control</code></p>
@@ -2196,6 +2200,8 @@ def admin_panel_edit_device(
     device = device_or_404(db, device_id)
     counts = device_counts(db, device.device_id)
 
+    current_secret = device.secret or ""
+
     body = f"""
     <div class="top">
         <h1>Edytuj urządzenie</h1>
@@ -2208,18 +2214,22 @@ def admin_panel_edit_device(
         <p>Device ID:</p>
         <p><code>{html.escape(device.device_id)}</code></p>
 
+        <p>Aktualny sekret:</p>
+        <p><code>{html.escape(current_secret)}</code></p>
+
         <p class="muted">
             Tokeny przypisane: {counts["tokens"]}<br>
             Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
-            Wszystkie komendy historycznie: {counts["all_commands"]}
+            Wszystkie komendy historycznie: {counts["all_commands"]}<br>
+            Ostatnio widziane: {html.escape(device.last_seen_at.isoformat()) if device.last_seen_at else ""}
         </p>
 
         <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/update')}">
             <label>Nazwa opisowa</label>
             <input name="name" value="{html.escape(device.name or '')}">
 
-            <label>Nowy sekret urządzenia</label>
-            <input name="secret" placeholder="zostaw puste, aby nie zmieniać">
+            <label>Sekret urządzenia</label>
+            <input name="secret" value="{html.escape(current_secret)}">
 
             <label>
                 <input type="checkbox" name="is_active" value="1" {"checked" if device.is_active else ""} style="width:auto">
@@ -2287,6 +2297,7 @@ async def admin_panel_update_device(
     <div class="card">
         <h1>Zapisano zmiany</h1>
         <p>Urządzenie: <code>{html.escape(device.device_id)}</code></p>
+        <p>Sekret: <code>{html.escape(device.secret or "")}</code></p>
         <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
         <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
     </div>
@@ -2371,11 +2382,6 @@ def admin_panel_delete_device_confirm(
             Tokeny przypisane do urządzenia: {counts["tokens"]}<br>
             Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
             Wszystkie komendy historycznie: {counts["all_commands"]}
-        </p>
-
-        <p>
-            Usunięcie urządzenia anuluje jego oczekujące/wysłane komendy.
-            Historia komend zostaje w bazie.
         </p>
 
         <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/delete')}">
@@ -2472,60 +2478,3 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
-
-
-@app.delete("/admin/devices/{device_id}")
-def admin_delete_device_api(
-    device_id: str,
-    delete_tokens: bool = False,
-    confirm: str = "",
-    x_admin_token: Optional[str] = Header(default=None),
-    db: Session = Depends(get_db),
-):
-    check_admin_auth(x_admin_token)
-
-    if confirm != "USUN":
-        raise HTTPException(status_code=400, detail="Confirmation required. Use confirm=USUN")
-
-    device = device_or_404(db, device_id)
-
-    cancelled_commands = (
-        db.query(Command)
-        .filter(Command.device_id == device.device_id)
-        .filter(Command.status.in_(["pending", "sent"]))
-        .update(
-            {
-                Command.status: "cancelled",
-                Command.message: "Cancelled because device was deleted",
-            },
-            synchronize_session=False,
-        )
-    )
-
-    if delete_tokens:
-        deleted_tokens = (
-            db.query(AccessToken)
-            .filter(AccessToken.device_id == device.device_id)
-            .delete(synchronize_session=False)
-        )
-    else:
-        deleted_tokens = 0
-
-    db.delete(device)
-
-    log_event(
-        db,
-        event_type="device_deleted",
-        status="ok",
-        device_id=device_id,
-        message=f"Device deleted via API; delete_tokens={delete_tokens}; deleted_tokens={deleted_tokens}; cancelled_commands={cancelled_commands}",
-    )
-
-    db.commit()
-
-    return {
-        "status": "ok",
-        "deleted_device_id": device_id,
-        "deleted_tokens": deleted_tokens,
-        "cancelled_commands": cancelled_commands,
-    }
