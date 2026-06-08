@@ -454,6 +454,49 @@ def render_page(title: str, body: str) -> str:
             color: #888;
             word-break: break-all;
         }}
+            .admin-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #222;
+            border-radius: 12px;
+            padding: 10px 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 18px rgba(0,0,0,.12);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .admin-nav a {
+            display: inline-block;
+            color: white;
+            text-decoration: none;
+            padding: 9px 12px;
+            border-radius: 8px;
+            background: #333;
+            font-size: 14px;
+        }
+
+        .admin-nav a:hover {
+            background: #444;
+        }
+
+        .admin-nav .brand {
+            font-weight: bold;
+            background: #111;
+        }
+
+        @media (max-width: 700px) {
+            .admin-nav {
+                position: static;
+            }
+
+            .admin-nav a {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1069,9 +1112,57 @@ def admin_panel_page(title: str, body: str) -> str:
                 grid-template-columns: 1fr;
             }}
         }}
+            .admin-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #222;
+            border-radius: 12px;
+            padding: 10px 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 18px rgba(0,0,0,.12);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .admin-nav a {
+            display: inline-block;
+            color: white;
+            text-decoration: none;
+            padding: 9px 12px;
+            border-radius: 8px;
+            background: #333;
+            font-size: 14px;
+        }
+
+        .admin-nav a:hover {
+            background: #444;
+        }
+
+        .admin-nav .brand {
+            font-weight: bold;
+            background: #111;
+        }
+
+        @media (max-width: 700px) {
+            .admin-nav {
+                position: static;
+            }
+
+            .admin-nav a {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
+    <nav class="admin-nav">
+        <a class="brand" href="{public_path('/admin-panel')}">Gate Control</a>
+        <a href="{public_path('/admin-panel')}">Piloty / tokeny</a>
+        <a href="{public_path('/admin-panel/devices')}">Urządzenia ESP32</a>
+    </nav>
     {body}
 </body>
 </html>
@@ -1182,19 +1273,7 @@ def admin_panel(
             <button class="danger" type="submit">Usuń wszystkie tokeny</button>
         </form>
     </div>
-
-    <div class="card">
-        <h2>Nawigacja</h2>
-        <p>
-            <a href="{public_path('/admin-panel/devices')}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#222;color:white;text-decoration:none;margin-right:8px;margin-top:8px;">
-                Urządzenia ESP32
-            </a>
-            <a href="{public_path('/admin-panel')}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#444;color:white;text-decoration:none;margin-right:8px;margin-top:8px;">
-                Piloty / tokeny
-            </a>
-        </p>
-    </div>
-    <div class="card">
+<div class="card">
         <h2>Utwórz pilota / link</h2>
 
         <form method="post" action="{public_path('/admin-panel/tokens')}">
@@ -1590,6 +1669,49 @@ def client_pilot_page(
             box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
         }}
         .led.on {{ background: #39ff6a; box-shadow: 0 0 14px rgba(57,255,106,.8); }}
+            .admin-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #222;
+            border-radius: 12px;
+            padding: 10px 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 18px rgba(0,0,0,.12);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .admin-nav a {
+            display: inline-block;
+            color: white;
+            text-decoration: none;
+            padding: 9px 12px;
+            border-radius: 8px;
+            background: #333;
+            font-size: 14px;
+        }
+
+        .admin-nav a:hover {
+            background: #444;
+        }
+
+        .admin-nav .brand {
+            font-weight: bold;
+            background: #111;
+        }
+
+        @media (max-width: 700px) {
+            .admin-nav {
+                position: static;
+            }
+
+            .admin-nav a {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
@@ -2489,5 +2611,6 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
 
 
