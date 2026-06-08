@@ -1137,6 +1137,21 @@ def admin_panel(
     </div>
 
     <div class="card">
+        <h2>Usuń wszystkie tokeny</h2>
+        <p class="muted">
+            Usuwa wszystkie linki/piloty dostępu. Historia komend i logi zostają.
+            Oczekujące komendy zostaną anulowane.
+        </p>
+
+        <form method="post" action="/gate-control/admin-panel/tokens/delete-all">
+            <label>Potwierdzenie</label>
+            <input name="confirm" placeholder="Wpisz: USUN" autocomplete="off">
+
+            <button class="danger" type="submit">Usuń wszystkie tokeny</button>
+        </form>
+    </div>
+
+    <div class="card">
         <h2>Utwórz pilota / link</h2>
 
         <form method="post" action="{public_path('/admin-panel/tokens')}">
@@ -1793,3 +1808,105 @@ def client_pilot_command_status(
         "token_status": token.status,
     }
 
+# ===== Delete all tokens endpoints =====
+
+@app.post("/admin-panel/tokens/delete-all", response_class=HTMLResponse)
+async def admin_panel_delete_all_tokens(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    form = await request.form()
+    confirm = str(form.get("confirm") or "").strip()
+
+    if confirm != "USUN":
+        body = f"""
+        <div class="card">
+            <h1>Nie usunięto tokenów</h1>
+            <p>Potwierdzenie było nieprawidłowe. Trzeba wpisać dokładnie: <code>USUN</code></p>
+            <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+        </div>
+        """
+        return HTMLResponse(admin_panel_page("Nie usunięto tokenów", body))
+
+    token_count = db.query(AccessToken).count()
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because all access tokens were deleted",
+            },
+            synchronize_session=False,
+        )
+    )
+
+    db.query(AccessToken).delete(synchronize_session=False)
+
+    log_event(
+        db,
+        event_type="tokens_deleted",
+        request=request,
+        status="ok",
+        message=f"Deleted {token_count} tokens; cancelled {cancelled_commands} commands",
+    )
+
+    db.commit()
+
+    body = f"""
+    <div class="card">
+        <h1>Usunięto tokeny</h1>
+        <p>Usunięto tokenów: <strong>{token_count}</strong></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Usunięto tokeny", body))
+
+
+@app.post("/admin/tokens/delete-all")
+def admin_delete_all_tokens(
+    confirm: str = "",
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    if confirm != "USUN":
+        raise HTTPException(status_code=400, detail="Confirmation required. Use confirm=USUN")
+
+    token_count = db.query(AccessToken).count()
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because all access tokens were deleted",
+            },
+            synchronize_session=False,
+        )
+    )
+
+    db.query(AccessToken).delete(synchronize_session=False)
+
+    log_event(
+        db,
+        event_type="tokens_deleted",
+        status="ok",
+        message=f"Deleted {token_count} tokens; cancelled {cancelled_commands} commands",
+    )
+
+    db.commit()
+
+    return {
+        "status": "ok",
+        "deleted_tokens": token_count,
+        "cancelled_commands": cancelled_commands,
+    }
