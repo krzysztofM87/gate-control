@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <Arduino.h>
 
@@ -19,9 +19,35 @@
 // ===== WiFi =====
 #define WIFI_CONNECT_TIMEOUT_MS 20000
 
+// Co ile najczęściej wolno wymuszać reconnect WiFi podczas pracy.
+// Chroni przed nerwową pętlą reconnectów.
+#define WIFI_RECONNECT_MIN_INTERVAL_MS 15000
+
+// RSSI poniżej tej wartości tylko ostrzegamy w logu.
+// Nie reconnectujemy od razu, bo słaby sygnał często nadal działa.
+#define WIFI_RSSI_WARN_DBM -75
+
 // ===== API =====
 #define POLL_INTERVAL_MS 5000
 #define API_TIMEOUT_MS 5000
+
+// Ile kolejnych błędów API powoduje reconnect WiFi/API.
+#define API_FAILS_BEFORE_WIFI_RECONNECT 5
+
+// Ile kolejnych błędów API powoduje restart ESP32.
+// 60 * 5 s = ok. 5 minut awarii, więc to już nie chwilowa czkawka.
+#define API_FAILS_BEFORE_REBOOT 60
+
+// Co ile wypisać status WiFi/API przy normalnej pracy.
+#define STATUS_PRINT_INTERVAL_MS 60000
+
+// ===== Oszczędzanie energii =====
+// Modem sleep WiFi. Dobre dla pracy z cyklicznym pollingiem.
+#define WIFI_POWER_SAVE_ENABLED 1
+
+// Obniżenie taktowania CPU. Do HTTP/pollingu/przekaźnika 80 MHz wystarcza.
+#define CPU_POWER_SAVE_ENABLED 1
+#define CPU_FREQUENCY_MHZ 80
 
 // ===== Portal konfiguracyjny =====
 #define CONFIG_NAMESPACE "gatecfg"
@@ -41,5 +67,4 @@
 #define LOG_LEVEL_INFO 3
 #define LOG_LEVEL_DEBUG 4
 
-#define LOG_LEVEL  LOG_LEVEL_INFO
-
+#define LOG_LEVEL LOG_LEVEL_INFO
