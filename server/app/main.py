@@ -1827,3 +1827,886 @@ def client_pilot_command_status(
         "max_uses": token.max_uses,
         "token_status": token.status,
     }
+
+# ===== Admin panel HTML =====
+
+def admin_panel_token_from_request(request: Request) -> Optional[str]:
+    return request.cookies.get("gate_admin_token") or request.query_params.get("admin_token")
+
+
+def is_admin_panel_authorized(request: Request) -> bool:
+    token = admin_panel_token_from_request(request)
+
+    try:
+        check_admin_auth(token)
+        return True
+    except HTTPException:
+        return False
+
+
+def display_pilot_title(token: AccessToken) -> str:
+    return token.pilot_title or token.label or "Pilot do bramy"
+
+
+def display_button_label(token: AccessToken, target: str) -> str:
+    if target == "open_1":
+        return token.button_1_label or ("Brama 1" if token.gate_target == "open_both" else "Otwórz")
+
+    if target == "open_2":
+        return token.button_2_label or ("Brama 2" if token.gate_target == "open_both" else "Otwórz")
+
+    if target == "open_both":
+        return token.button_both_label or "Obie"
+
+    return "Otwórz"
+
+
+def admin_panel_page(title: str, body: str) -> str:
+    return f"""
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <title>{html.escape(title)}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 1100px;
+            margin: 32px auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #222;
+        }}
+        .card {{
+            background: #fff;
+            border-radius: 14px;
+            padding: 22px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.07);
+        }}
+        h1, h2 {{
+            margin-top: 0;
+        }}
+        label {{
+            display: block;
+            margin-top: 12px;
+            font-weight: bold;
+        }}
+        input, select {{
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px;
+            border: 1px solid #bbb;
+            border-radius: 8px;
+            font-size: 15px;
+            margin-top: 4px;
+        }}
+        button {{
+            padding: 12px 18px;
+            border: 0;
+            border-radius: 8px;
+            background: #222;
+            color: white;
+            cursor: pointer;
+            margin-top: 14px;
+            font-size: 15px;
+        }}
+        a {{
+            color: #111;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }}
+        th, td {{
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            padding: 8px;
+            vertical-align: top;
+        }}
+        code {{
+            background: #eee;
+            padding: 2px 4px;
+            border-radius: 4px;
+            word-break: break-all;
+        }}
+        .muted {{
+            color: #666;
+            font-size: 13px;
+        }}
+        .top {{
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+        }}
+        .danger {{
+            background: #7a1f1f;
+        }}
+        .grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }}
+        @media (max-width: 700px) {{
+            .grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    {body}
+</body>
+</html>
+"""
+
+
+def admin_login_page(error: Optional[str] = None) -> HTMLResponse:
+    error_html = ""
+
+    if error:
+        error_html = f"<p style='color:#8b0000'><strong>{html.escape(error)}</strong></p>"
+
+    body = f"""
+    <div class="card">
+        <h1>Gate Control - panel admina</h1>
+        <p class="muted">Wpisz ADMIN_TOKEN z pliku .env.</p>
+        {error_html}
+        <form method="post" action="{public_path('/admin-panel/login')}">
+            <label>Admin token</label>
+            <input name="admin_token" type="password" autocomplete="off" required>
+            <button type="submit">Zaloguj</button>
+        </form>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Panel admina", body))
+
+
+@app.get("/admin-panel", response_class=HTMLResponse)
+def admin_panel(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page()
+
+    tokens = (
+        db.query(AccessToken)
+        .order_by(AccessToken.created_at.desc())
+        .limit(30)
+        .all()
+    )
+
+    commands = (
+        db.query(Command)
+        .order_by(Command.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    token_rows = ""
+
+    for token in tokens:
+        url = public_url(f"/pilot/{token.token_value}")
+        token_rows += f"""
+        <tr>
+            <td>{token.id}</td>
+            <td>{html.escape(token.label or "")}</td>
+            <td>{html.escape(display_pilot_title(token))}</td>
+            <td><code>{html.escape(token.gate_target)}</code></td>
+            <td>{html.escape(token.status)}</td>
+            <td>{token.used_count} / {token.max_uses if token.max_uses is not None else "∞"}</td>
+            <td>{html.escape(token.valid_to.isoformat())}</td>
+            <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
+        </tr>
+        """
+
+    if not token_rows:
+        token_rows = "<tr><td colspan='8'>Brak tokenów.</td></tr>"
+
+    command_rows = ""
+
+    for command in commands:
+        command_rows += f"""
+        <tr>
+            <td><code>{html.escape(command.command_id)}</code></td>
+            <td>{html.escape(command.device_id)}</td>
+            <td><code>{html.escape(command.command)}</code></td>
+            <td>{html.escape(command.status)}</td>
+            <td>{command.delivered_count}</td>
+            <td>{html.escape(command.created_at.isoformat())}</td>
+            <td>{html.escape(command.ack_at.isoformat()) if command.ack_at else ""}</td>
+        </tr>
+        """
+
+    if not command_rows:
+        command_rows = "<tr><td colspan='7'>Brak komend.</td></tr>"
+
+    body = f"""
+    <div class="top">
+        <h1>Gate Control - panel admina</h1>
+        <form method="post" action="{public_path('/admin-panel/logout')}">
+            <button class="danger" type="submit">Wyloguj</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Utwórz pilota / link</h2>
+
+        <form method="post" action="{public_path('/admin-panel/tokens')}">
+            <div class="grid">
+                <div>
+                    <label>Opis techniczny</label>
+                    <input name="label" value="test link">
+                </div>
+                <div>
+                    <label>Nazwa pilota wyświetlana klientowi</label>
+                    <input name="pilot_title" value="Pilot do bramy">
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Urządzenie</label>
+                    <input name="device_id" value="{html.escape(DEVICE_ID)}">
+                </div>
+                <div>
+                    <label>Brama / kanał</label>
+                    <select name="gate_target">
+                        <option value="open_1">Tylko przycisk 1 / GPIO26</option>
+                        <option value="open_2">Tylko przycisk 2 / GPIO27</option>
+                        <option value="open_both">Pilot z trzema przyciskami</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Nazwa przycisku 1</label>
+                    <input name="button_1_label" value="Brama 1">
+                </div>
+                <div>
+                    <label>Nazwa przycisku 2</label>
+                    <input name="button_2_label" value="Brama 2">
+                </div>
+            </div>
+
+            <label>Nazwa przycisku „obie”</label>
+            <input name="button_both_label" value="Obie bramy">
+
+            <div class="grid">
+                <div>
+                    <label>Ważność w godzinach</label>
+                    <input name="valid_hours" type="number" value="{TOKEN_DEFAULT_VALID_HOURS}" min="1" max="1440">
+                </div>
+                <div>
+                    <label>Limit użyć, puste = bez limitu</label>
+                    <input name="max_uses" type="number" value="10" min="1" max="1000">
+                </div>
+            </div>
+
+            <label>Cooldown w sekundach</label>
+            <input name="open_cooldown_seconds" type="number" value="{OPEN_COOLDOWN_SECONDS}" min="0" max="3600">
+
+            <button type="submit">Utwórz pilota</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Ostatnie tokeny / piloty</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Etykieta</th>
+                    <th>Nazwa pilota</th>
+                    <th>Cel</th>
+                    <th>Status</th>
+                    <th>Użycia</th>
+                    <th>Ważny do</th>
+                    <th>Link</th>
+                </tr>
+            </thead>
+            <tbody>
+                {token_rows}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>Ostatnie komendy</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Command ID</th>
+                    <th>Device</th>
+                    <th>Komenda</th>
+                    <th>Status</th>
+                    <th>Dostarczono</th>
+                    <th>Utworzono</th>
+                    <th>ACK</th>
+                </tr>
+            </thead>
+            <tbody>
+                {command_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Panel admina", body))
+
+
+@app.post("/admin-panel/login", response_class=HTMLResponse)
+async def admin_panel_login(request: Request):
+    form = await request.form()
+    admin_token = str(form.get("admin_token") or "")
+
+    try:
+        check_admin_auth(admin_token)
+    except HTTPException:
+        return admin_login_page("Nieprawidłowy admin token.")
+
+    response = HTMLResponse(
+        admin_panel_page(
+            "Zalogowano",
+            f"""
+            <div class="card">
+                <h1>Zalogowano</h1>
+                <p>Przejdź do panelu.</p>
+                <a href="{public_path('/admin-panel')}">Otwórz panel</a>
+            </div>
+            """
+        )
+    )
+
+    response.set_cookie(
+        key="gate_admin_token",
+        value=admin_token,
+        max_age=60 * 60 * 12,
+        httponly=True,
+        samesite="lax",
+    )
+
+    return response
+
+
+@app.post("/admin-panel/logout", response_class=HTMLResponse)
+def admin_panel_logout():
+    response = HTMLResponse(
+        admin_panel_page(
+            "Wylogowano",
+            f"""
+            <div class="card">
+                <h1>Wylogowano</h1>
+                <a href="{public_path('/admin-panel')}">Wróć do logowania</a>
+            </div>
+            """
+        )
+    )
+
+    response.delete_cookie("gate_admin_token")
+    return response
+
+
+@app.post("/admin-panel/tokens", response_class=HTMLResponse)
+async def admin_panel_create_token(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    form = await request.form()
+
+    label = str(form.get("label") or "")
+    pilot_title = str(form.get("pilot_title") or "")
+    button_1_label = str(form.get("button_1_label") or "")
+    button_2_label = str(form.get("button_2_label") or "")
+    button_both_label = str(form.get("button_both_label") or "")
+
+    device_id = str(form.get("device_id") or DEVICE_ID)
+    gate_target = normalize_gate_target(str(form.get("gate_target") or "open_1"))
+
+    try:
+        valid_hours = int(form.get("valid_hours") or TOKEN_DEFAULT_VALID_HOURS)
+    except ValueError:
+        valid_hours = TOKEN_DEFAULT_VALID_HOURS
+
+    max_uses_raw = str(form.get("max_uses") or "").strip()
+    if max_uses_raw == "":
+        max_uses = None
+    else:
+        try:
+            max_uses = int(max_uses_raw)
+        except ValueError:
+            max_uses = 10
+
+        max_uses = max(1, min(max_uses, 1000))
+
+    try:
+        cooldown = int(form.get("open_cooldown_seconds") or OPEN_COOLDOWN_SECONDS)
+    except ValueError:
+        cooldown = OPEN_COOLDOWN_SECONDS
+
+    valid_hours = max(1, min(valid_hours, 24 * 60))
+    cooldown = max(0, min(cooldown, 3600))
+
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    token_value = secrets.token_urlsafe(32)
+    valid_from = now_utc()
+    valid_to = valid_from + timedelta(hours=valid_hours)
+
+    token = AccessToken(
+        token_value=token_value,
+        label=label,
+        pilot_title=pilot_title,
+        button_1_label=button_1_label,
+        button_2_label=button_2_label,
+        button_both_label=button_both_label,
+        device_id=device.device_id,
+        gate_target=gate_target,
+        status="active",
+        is_active=True,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        max_uses=max_uses,
+        used_count=0,
+        open_cooldown_seconds=cooldown,
+    )
+
+    db.add(token)
+    db.flush()
+
+    log_event(
+        db,
+        event_type="token_created",
+        request=request,
+        status="active",
+        token=token,
+        message=f"Token created from admin panel for {gate_target}",
+    )
+
+    db.commit()
+    db.refresh(token)
+
+    url = public_url(f"/pilot/{token.token_value}")
+
+    body = f"""
+    <div class="card">
+        <h1>Utworzono pilota</h1>
+        <p><strong>{html.escape(display_pilot_title(token))}</strong></p>
+        <p>Cel: <code>{html.escape(gate_target)}</code></p>
+        <p><a href="{html.escape(url)}" target="_blank">Otwórz pilota</a></p>
+        <p><code>{html.escape(url)}</code></p>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Utworzono pilota", body))
+
+
+# ===== Client pilot page =====
+
+@app.get("/pilot/{token_value}", response_class=HTMLResponse)
+def client_pilot_page(
+    token_value: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    if token.gate_target == "open_both":
+        buttons = [
+            ("1", display_button_label(token, "open_1"), "primary"),
+            ("2", display_button_label(token, "open_2"), "secondary"),
+            ("both", display_button_label(token, "open_both"), "danger"),
+        ]
+    elif token.gate_target == "open_2":
+        buttons = [
+            ("2", display_button_label(token, "open_2"), "primary"),
+        ]
+    else:
+        buttons = [
+            ("1", display_button_label(token, "open_1"), "primary"),
+        ]
+
+    buttons_html = ""
+
+    for gate, label, css_class in buttons:
+        press_url = public_path(f"/pilot/{token_value}/press/{gate}")
+
+        buttons_html += f"""
+        <button class="remote-button {css_class}" data-url="{html.escape(press_url)}">
+            {html.escape(label)}
+        </button>
+        """
+
+    max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
+    title = display_pilot_title(token)
+
+    body = f"""
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <title>{html.escape(title)}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            background: radial-gradient(circle at top, #333 0, #111 48%, #050505 100%);
+            color: #f4f4f4;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }}
+        .remote {{
+            width: 100%;
+            max-width: 360px;
+            background: linear-gradient(180deg, #2d2d2d, #171717);
+            border-radius: 36px;
+            padding: 28px 22px 24px;
+            box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.12);
+            border: 1px solid rgba(255,255,255,.08);
+        }}
+        .remote-header {{ text-align: center; margin-bottom: 22px; }}
+        .remote-title {{ font-size: 24px; font-weight: 700; letter-spacing: .5px; margin: 0; }}
+        .remote-subtitle {{ color: #aaa; font-size: 13px; margin-top: 7px; line-height: 1.35; }}
+        .status {{
+            min-height: 58px;
+            background: #101010;
+            border-radius: 16px;
+            padding: 13px 12px;
+            margin-bottom: 14px;
+            text-align: center;
+            color: #aaa;
+            border: 1px solid rgba(255,255,255,.08);
+            font-size: 14px;
+            line-height: 1.35;
+        }}
+        .status.ok {{ color: #b7ffc9; border-color: rgba(75, 255, 120, .3); }}
+        .status.wait {{ color: #ffe9a6; border-color: rgba(255, 220, 80, .35); }}
+        .status.err {{ color: #ffc1c1; border-color: rgba(255, 80, 80, .35); }}
+        .steps {{ display: grid; gap: 6px; margin-bottom: 18px; font-size: 13px; color: #777; }}
+        .step {{ background: rgba(255,255,255,.04); border-radius: 10px; padding: 8px 10px; }}
+        .step.active {{ color: #ffe9a6; }}
+        .step.done {{ color: #b7ffc9; }}
+        .buttons {{ display: grid; gap: 14px; }}
+        .remote-button {{
+            width: 100%;
+            min-height: 78px;
+            border: none;
+            border-radius: 22px;
+            color: white;
+            font-size: 23px;
+            font-weight: 700;
+            letter-spacing: .4px;
+            cursor: pointer;
+            box-shadow: 0 9px 0 rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.18);
+            transition: transform .06s ease, box-shadow .06s ease, opacity .2s ease;
+        }}
+        .remote-button:active {{
+            transform: translateY(6px);
+            box-shadow: 0 3px 0 rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.12);
+        }}
+        .remote-button:disabled {{ opacity: .55; cursor: wait; }}
+        .primary {{ background: linear-gradient(180deg, #2f7dff, #174aaf); }}
+        .secondary {{ background: linear-gradient(180deg, #666, #343434); }}
+        .danger {{ background: linear-gradient(180deg, #a43535, #641818); }}
+        .footer {{
+            margin-top: 20px;
+            text-align: center;
+            color: #777;
+            font-size: 11px;
+            word-break: break-all;
+            line-height: 1.35;
+        }}
+        .led {{
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #2d2d2d;
+            margin: 0 auto 14px;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
+        }}
+        .led.on {{ background: #39ff6a; box-shadow: 0 0 14px rgba(57,255,106,.8); }}
+    </style>
+</head>
+<body>
+    <main class="remote">
+        <div id="led" class="led"></div>
+
+        <div class="remote-header">
+            <h1 class="remote-title">{html.escape(title)}</h1>
+            <div class="remote-subtitle">Naciśnij przycisk, aby wysłać polecenie do sterownika.</div>
+        </div>
+
+        <div id="status" class="status">Gotowy</div>
+
+        <div class="steps">
+            <div id="step-created" class="step">1. Komenda zapisana na serwerze</div>
+            <div id="step-sent" class="step">2. Sterownik odebrał komendę</div>
+            <div id="step-done" class="step">3. Sterownik potwierdził wykonanie</div>
+        </div>
+
+        <div class="buttons">
+            {buttons_html}
+        </div>
+
+        <div class="footer">
+            Ważny do: {html.escape(token.valid_to.isoformat())}<br>
+            Użycia: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span>
+        </div>
+    </main>
+
+    <script>
+        const statusEl = document.getElementById("status");
+        const ledEl = document.getElementById("led");
+        const buttons = Array.from(document.querySelectorAll(".remote-button"));
+        const stepCreated = document.getElementById("step-created");
+        const stepSent = document.getElementById("step-sent");
+        const stepDone = document.getElementById("step-done");
+        const usageCountEl = document.getElementById("usage-count");
+        const usageMaxEl = document.getElementById("usage-max");
+
+        let readyTimer = null;
+
+        function setStatus(text, mode) {{
+            statusEl.textContent = text;
+            statusEl.className = "status" + (mode ? " " + mode : "");
+        }}
+
+        function clearReadyTimer() {{
+            if (readyTimer) {{
+                clearTimeout(readyTimer);
+                readyTimer = null;
+            }}
+        }}
+
+        function resetSteps() {{
+            [stepCreated, stepSent, stepDone].forEach(step => step.className = "step");
+        }}
+
+        function scheduleReady() {{
+            clearReadyTimer();
+            readyTimer = setTimeout(() => {{
+                resetSteps();
+                setStatus("Gotowy", "");
+            }}, 2500);
+        }}
+
+        function setStep(step, state) {{
+            step.className = "step " + state;
+        }}
+
+        function setBusy(isBusy) {{
+            buttons.forEach(button => button.disabled = isBusy);
+            ledEl.classList.toggle("on", isBusy);
+        }}
+
+        function updateUsage(data) {{
+            if (!data) return;
+
+            if (typeof data.used_count !== "undefined" && data.used_count !== null) {{
+                usageCountEl.textContent = data.used_count;
+            }}
+
+            if (typeof data.max_uses !== "undefined") {{
+                usageMaxEl.textContent = data.max_uses === null ? "bez limitu" : data.max_uses;
+            }}
+        }}
+
+        async function checkCommandStatus(statusUrl) {{
+            const response = await fetch(statusUrl, {{
+                method: "GET",
+                headers: {{ "X-Requested-With": "fetch" }}
+            }});
+
+            const data = await response.json();
+
+            if (!response.ok) {{
+                throw new Error(data.detail || "Błąd statusu HTTP " + response.status);
+            }}
+
+            return data;
+        }}
+
+        async function watchCommandStatus(statusUrl) {{
+            const maxAttempts = 20;
+
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {{
+                const data = await checkCommandStatus(statusUrl);
+                updateUsage(data);
+
+                if (data.status === "pending") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "active");
+                    setStatus("Komenda zapisana. Czekam aż sterownik ją odbierze...", "wait");
+                }}
+
+                if (data.status === "sent") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "active");
+                    setStatus("Sterownik odebrał komendę. Czekam na potwierdzenie...", "wait");
+                }}
+
+                if (data.status === "done") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "done");
+                    setStatus("Wykonano. Sterownik potwierdził komendę.", "ok");
+
+                    if (navigator.vibrate) {{
+                        navigator.vibrate([60, 40, 60]);
+                    }}
+
+                    scheduleReady();
+                    return;
+                }}
+
+                if (data.status !== "pending" && data.status !== "sent" && data.status !== "done") {{
+                    setStatus("Status komendy: " + data.status, "err");
+                    return;
+                }}
+
+                await new Promise(resolve => setTimeout(resolve, 700));
+            }}
+
+            setStatus("Komenda wysłana, ale brak potwierdzenia w oczekiwanym czasie.", "err");
+        }}
+
+        async function pressButton(url, label) {{
+            clearReadyTimer();
+            resetSteps();
+            setBusy(true);
+            setStatus("Wysyłam polecenie: " + label + "...", "wait");
+
+            try {{
+                const response = await fetch(url, {{
+                    method: "POST",
+                    headers: {{ "X-Requested-With": "fetch" }}
+                }});
+
+                const data = await response.json();
+                updateUsage(data);
+
+                if (!response.ok) {{
+                    const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+                    setStatus(message, "err");
+                    return;
+                }}
+
+                if (data && data.status === "ok") {{
+                    setStep(stepCreated, "done");
+                    setStatus("Komenda zapisana na serwerze.", "wait");
+
+                    if (data.status_url) {{
+                        await watchCommandStatus(data.status_url);
+                    }} else {{
+                        setStatus("Polecenie wysłane: " + data.command, "ok");
+                        scheduleReady();
+                    }}
+
+                    return;
+                }}
+
+                setStatus("Polecenie wysłane", "ok");
+                scheduleReady();
+            }} catch (err) {{
+                setStatus("Błąd: " + err.message, "err");
+            }} finally {{
+                setTimeout(() => setBusy(false), 700);
+            }}
+        }}
+
+        buttons.forEach(button => {{
+            button.addEventListener("click", () => {{
+                pressButton(button.dataset.url, button.textContent.trim());
+            }});
+        }});
+    </script>
+</body>
+</html>
+"""
+
+    return HTMLResponse(body)
+
+
+@app.post("/pilot/{token_value}/press/{gate}")
+def client_pilot_press(
+    token_value: str,
+    gate: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    command = create_command_from_token(
+        db,
+        token=token,
+        requested_gate=gate,
+        request=request,
+    )
+
+    db.refresh(token)
+
+    return {
+        "status": "ok",
+        "command": command.command,
+        "command_id": command.command_id,
+        "relay_time_ms": command.relay_time_ms,
+        "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "token_status": token.status,
+    }
+
+
+@app.get("/pilot/{token_value}/command/{command_id}/status")
+def client_pilot_command_status(
+    token_value: str,
+    command_id: str,
+    db: Session = Depends(get_db),
+):
+    token = db.query(AccessToken).filter(AccessToken.token_value == token_value).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    command = (
+        db.query(Command)
+        .filter(Command.command_id == command_id)
+        .filter(Command.token_id == token.id)
+        .first()
+    )
+
+    if command is None:
+        raise HTTPException(status_code=404, detail="Command not found")
+
+    return {
+        "command_id": command.command_id,
+        "command": command.command,
+        "status": command.status,
+        "delivered_count": command.delivered_count,
+        "created_at": command.created_at.isoformat() if command.created_at else None,
+        "sent_at": command.sent_at.isoformat() if command.sent_at else None,
+        "ack_at": command.ack_at.isoformat() if command.ack_at else None,
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "token_status": token.status,
+    }
