@@ -45,6 +45,7 @@ class AccessToken(Base):
 
     valid_from = Column(DateTime(timezone=True), nullable=False)
     valid_to = Column(DateTime(timezone=True), nullable=False)
+    valid_forever = Column(Boolean, default=False, nullable=False)
 
     max_uses = Column(Integer, nullable=True)
     used_count = Column(Integer, default=0, nullable=False)
@@ -95,3 +96,4 @@ class CommandLog(Base):
     user_agent = Column(String(500), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
+

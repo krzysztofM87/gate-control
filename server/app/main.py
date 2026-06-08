@@ -26,6 +26,10 @@ COMMAND_RELAY_TIME_MS = int(os.getenv("COMMAND_RELAY_TIME_MS", "700"))
 TOKEN_DEFAULT_VALID_HOURS = int(os.getenv("TOKEN_DEFAULT_VALID_HOURS", "72"))
 OPEN_COOLDOWN_SECONDS = int(os.getenv("OPEN_COOLDOWN_SECONDS", "5"))
 
+# SQLite ma valid_to jako NOT NULL, więc dla bezterminowych pilotów
+# trzymamy technicznie daleką datę i flagę valid_forever.
+FOREVER_VALID_TO = datetime(9999, 12, 31, 23, 59, 59)
+
 
 app = FastAPI(
     title="Gate Control",
@@ -42,10 +46,20 @@ class AckRequest(BaseModel):
 
 class CreateTokenRequest(BaseModel):
     label: Optional[str] = None
+    pilot_title: Optional[str] = None
+    button_1_label: Optional[str] = None
+    button_2_label: Optional[str] = None
+    button_both_label: Optional[str] = None
+
     device_id: Optional[str] = None
     gate_target: str = "open_1"
-    valid_hours: int = Field(default=TOKEN_DEFAULT_VALID_HOURS, ge=1, le=24 * 60)
-    max_uses: Optional[int] = Field(default=3, ge=1, le=1000)
+
+    # null = bezterminowo
+    valid_hours: Optional[int] = Field(default=TOKEN_DEFAULT_VALID_HOURS, ge=1, le=24 * 60)
+
+    # null = bez limitu użyć
+    max_uses: Optional[int] = Field(default=10, ge=1, le=1000)
+
     open_cooldown_seconds: int = Field(default=OPEN_COOLDOWN_SECONDS, ge=0, le=3600)
 
 
@@ -261,7 +275,7 @@ def validate_access_token(db: Session, token_value: str, request: Request) -> Ac
         db.commit()
         raise HTTPException(status_code=403, detail="Token not yet valid")
 
-    if token.valid_to < now:
+    if (not getattr(token, "valid_forever", False)) and token.valid_to < now:
         token.status = "expired"
         log_event(
             db,
@@ -526,7 +540,7 @@ def gate_page(
         <p>Naciśnij przycisk, aby wysłać polecenie otwarcia.</p>
         {buttons}
         <div class="small">
-            Ważny do: {html.escape(token.valid_to.isoformat())}<br>
+            Ważny do: {html.escape(token_valid_to_text(token))}<br>
             Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}
         </div>
     """
@@ -755,7 +769,8 @@ def admin_create_token(
 
     token_value = secrets.token_urlsafe(32)
     valid_from = now_utc()
-    valid_to = valid_from + timedelta(hours=payload.valid_hours)
+    valid_forever = payload.valid_hours is None
+    valid_to = FOREVER_VALID_TO if valid_forever else valid_from + timedelta(hours=payload.valid_hours)
 
     token = AccessToken(
         token_value=token_value,
@@ -766,6 +781,7 @@ def admin_create_token(
         is_active=True,
         valid_from=valid_from,
         valid_to=valid_to,
+        valid_forever=valid_forever,
         max_uses=payload.max_uses,
         used_count=0,
         open_cooldown_seconds=payload.open_cooldown_seconds,
@@ -793,8 +809,10 @@ def admin_create_token(
         "device_id": token.device_id,
         "gate_target": token.gate_target,
         "valid_from": token.valid_from.isoformat(),
-        "valid_to": token.valid_to.isoformat(),
+        "valid_to": None if getattr(token, "valid_forever", False) else token.valid_to.isoformat(),
+        "valid_forever": getattr(token, "valid_forever", False),
         "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
     }
 
 
@@ -824,9 +842,11 @@ def admin_list_tokens(
                 "status": token.status,
                 "is_active": token.is_active,
                 "valid_from": token.valid_from.isoformat(),
-                "valid_to": token.valid_to.isoformat(),
+                "valid_to": None if getattr(token, "valid_forever", False) else token.valid_to.isoformat(),
+        "valid_forever": getattr(token, "valid_forever", False),
                 "used_count": token.used_count,
                 "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
             }
             for token in tokens
         ]
@@ -909,6 +929,16 @@ def debug_state(db: Session = Depends(get_db)):
             "created_at": last_log.created_at.isoformat(),
         } if last_log else None,
     }
+
+
+def token_valid_to_text(token: AccessToken) -> str:
+    if getattr(token, "valid_forever", False):
+        return "bezterminowo"
+
+    if token.valid_to is None:
+        return "brak"
+
+    return token.valid_to.isoformat()
 
 # ===== Admin panel HTML =====
 
@@ -1102,7 +1132,7 @@ def admin_panel(
             <td><code>{html.escape(token.gate_target)}</code></td>
             <td>{html.escape(token.status)}</td>
             <td>{token.used_count} / {token.max_uses if token.max_uses is not None else "∞"}</td>
-            <td>{html.escape(token.valid_to.isoformat())}</td>
+            <td>{html.escape(token_valid_to_text(token))}</td>
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
         </tr>
         """
@@ -1197,8 +1227,8 @@ def admin_panel(
 
             <div class="grid">
                 <div>
-                    <label>Ważność w godzinach</label>
-                    <input name="valid_hours" type="number" value="{TOKEN_DEFAULT_VALID_HOURS}" min="1" max="1440">
+                    <label>Ważność w godzinach, puste = bezterminowo</label>
+                    <input name="valid_hours" type="number" value="{TOKEN_DEFAULT_VALID_HOURS}" min="1" max="1440" placeholder="puste = bezterminowo">
                 </div>
                 <div>
                     <label>Limit użyć, puste = bez limitu</label>
@@ -1329,10 +1359,17 @@ async def admin_panel_create_token(
     device_id = str(form.get("device_id") or DEVICE_ID)
     gate_target = normalize_gate_target(str(form.get("gate_target") or "open_1"))
 
-    try:
-        valid_hours = int(form.get("valid_hours") or TOKEN_DEFAULT_VALID_HOURS)
-    except ValueError:
-        valid_hours = TOKEN_DEFAULT_VALID_HOURS
+    valid_hours_raw = str(form.get("valid_hours") or "").strip()
+
+    if valid_hours_raw == "":
+        valid_hours = None
+        valid_forever = True
+    else:
+        try:
+            valid_hours = int(valid_hours_raw)
+        except ValueError:
+            valid_hours = TOKEN_DEFAULT_VALID_HOURS
+        valid_forever = False
 
     max_uses_raw = str(form.get("max_uses") or "").strip()
     if max_uses_raw == "":
@@ -1349,8 +1386,6 @@ async def admin_panel_create_token(
         cooldown = int(form.get("open_cooldown_seconds") or OPEN_COOLDOWN_SECONDS)
     except ValueError:
         cooldown = OPEN_COOLDOWN_SECONDS
-
-    valid_hours = max(1, min(valid_hours, 24 * 60))
     cooldown = max(0, min(cooldown, 3600))
 
     device = db.query(Device).filter(Device.device_id == device_id).first()
@@ -1360,7 +1395,7 @@ async def admin_panel_create_token(
 
     token_value = secrets.token_urlsafe(32)
     valid_from = now_utc()
-    valid_to = valid_from + timedelta(hours=valid_hours)
+    valid_to = FOREVER_VALID_TO if valid_forever else valid_from + timedelta(hours=valid_hours)
 
     token = AccessToken(
         token_value=token_value,
@@ -1375,6 +1410,7 @@ async def admin_panel_create_token(
         is_active=True,
         valid_from=valid_from,
         valid_to=valid_to,
+        valid_forever=valid_forever,
         max_uses=max_uses,
         used_count=0,
         open_cooldown_seconds=cooldown,
@@ -1565,7 +1601,7 @@ def client_pilot_page(
         </div>
 
         <div class="footer">
-            Ważny do: {html.escape(token.valid_to.isoformat())}<br>
+            Ważny do: {html.escape(token_valid_to_text(token))}<br>
             Użycia: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span>
         </div>
     </main>
@@ -1770,6 +1806,7 @@ def client_pilot_press(
         "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
         "used_count": token.used_count,
         "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
 
@@ -1805,6 +1842,7 @@ def client_pilot_command_status(
         "ack_at": command.ack_at.isoformat() if command.ack_at else None,
         "used_count": token.used_count,
         "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
 
@@ -1910,3 +1948,4 @@ def admin_delete_all_tokens(
         "deleted_tokens": token_count,
         "cancelled_commands": cancelled_commands,
     }
+
