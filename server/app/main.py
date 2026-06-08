@@ -1112,7 +1112,7 @@ def admin_panel_page(title: str, body: str) -> str:
                 grid-template-columns: 1fr;
             }}
         }}
-            .admin-nav {
+            .admin-nav {{
             position: sticky;
             top: 0;
             z-index: 100;
@@ -1125,9 +1125,9 @@ def admin_panel_page(title: str, body: str) -> str:
             gap: 8px;
             flex-wrap: wrap;
             align-items: center;
-        }
+        }}
 
-        .admin-nav a {
+        .admin-nav a {{
             display: inline-block;
             color: white;
             text-decoration: none;
@@ -1135,26 +1135,26 @@ def admin_panel_page(title: str, body: str) -> str:
             border-radius: 8px;
             background: #333;
             font-size: 14px;
-        }
+        }}
 
-        .admin-nav a:hover {
+        .admin-nav a:hover {{
             background: #444;
-        }
+        }}
 
-        .admin-nav .brand {
+        .admin-nav .brand {{
             font-weight: bold;
             background: #111;
-        }
+        }}
 
-        @media (max-width: 700px) {
-            .admin-nav {
+        @media (max-width: 700px) {{
+            .admin-nav {{
                 position: static;
-            }
+            }}
 
-            .admin-nav a {
+            .admin-nav a {{
                 width: 100%;
-            }
-        }
+            }}
+        }}
     </style>
 </head>
 <body>
@@ -1669,7 +1669,7 @@ def client_pilot_page(
             box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
         }}
         .led.on {{ background: #39ff6a; box-shadow: 0 0 14px rgba(57,255,106,.8); }}
-            .admin-nav {
+            .admin-nav {{
             position: sticky;
             top: 0;
             z-index: 100;
@@ -1682,9 +1682,9 @@ def client_pilot_page(
             gap: 8px;
             flex-wrap: wrap;
             align-items: center;
-        }
+        }}
 
-        .admin-nav a {
+        .admin-nav a {{
             display: inline-block;
             color: white;
             text-decoration: none;
@@ -1692,26 +1692,26 @@ def client_pilot_page(
             border-radius: 8px;
             background: #333;
             font-size: 14px;
-        }
+        }}
 
-        .admin-nav a:hover {
+        .admin-nav a:hover {{
             background: #444;
-        }
+        }}
 
-        .admin-nav .brand {
+        .admin-nav .brand {{
             font-weight: bold;
             background: #111;
-        }
+        }}
 
-        @media (max-width: 700px) {
-            .admin-nav {
+        @media (max-width: 700px) {{
+            .admin-nav {{
                 position: static;
-            }
+            }}
 
-            .admin-nav a {
+            .admin-nav a {{
                 width: 100%;
-            }
-        }
+            }}
+        }}
     </style>
 </head>
 <body>
@@ -2611,6 +2611,11 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
+
+
+
+
 
 
 
