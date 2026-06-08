@@ -37,7 +37,9 @@ static bool parseServerUrl(const char *url) {
   size_t prefixLen = strlen(prefix);
 
   if (strncmp(url, prefix, prefixLen) != 0) {
-    Serial.println("[API] Only http:// is supported in stable mode");
+    if (LOG_LEVEL >= LOG_LEVEL_ERROR) {
+      Serial.println("[API] Only http:// is supported in stable mode");
+    }
     return false;
   }
 
@@ -59,7 +61,9 @@ static bool parseServerUrl(const char *url) {
   }
 
   if (hostLen == 0 || hostLen >= sizeof(apiHost)) {
-    Serial.println("[API] Invalid host length");
+    if (LOG_LEVEL >= LOG_LEVEL_ERROR) {
+      Serial.println("[API] Invalid host length");
+    }
     return false;
   }
 
@@ -145,13 +149,18 @@ static bool rawHttpRequest(
   WiFiClient client;
   client.setTimeout(API_TIMEOUT_MS);
 
-  Serial.print("[HTTP] Connect ");
-  Serial.print(apiHost);
-  Serial.print(":");
-  Serial.println(apiPort);
+  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+    Serial.print("[HTTP] Connect ");
+    Serial.print(apiHost);
+    Serial.print(":");
+    Serial.println(apiPort);
+  }
 
   if (!client.connect(apiHost, apiPort)) {
-    Serial.println("[HTTP] Connect failed");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[HTTP] Connect failed");
+    }
+
     httpCode = -11;
     client.stop();
     return false;
@@ -189,14 +198,19 @@ static bool rawHttpRequest(
   char line[256];
 
   if (!readHttpLine(client, line, sizeof(line), API_TIMEOUT_MS)) {
-    Serial.println("[HTTP] No status line");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[HTTP] No status line");
+    }
+
     httpCode = -12;
     client.stop();
     return false;
   }
 
-  Serial.print("[HTTP] Status line: ");
-  Serial.println(line);
+  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+    Serial.print("[HTTP] Status line: ");
+    Serial.println(line);
+  }
 
   httpCode = parseStatusCode(line);
 
@@ -308,7 +322,9 @@ static uint8_t targetFromCommand(const char *command) {
   }
 
   if (strcmp(command, "open") == 0) {
-    Serial.println("[API] Command 'open' without target, defaulting to gate 1");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] Command 'open' without target, defaulting to gate 1");
+    }
     return GATE_TARGET_1;
   }
 
@@ -345,21 +361,27 @@ void setupApiClient(const DeviceConfig &config) {
     serverUrl.remove(serverUrl.length() - 1);
   }
 
-  Serial.print("[API] Server URL: ");
-  Serial.println(serverUrl);
-
-  if (!parseServerUrl(serverUrl.c_str())) {
-    Serial.println("[API] Server URL parse failed");
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] Server URL: ");
+    Serial.println(serverUrl);
   }
 
-  Serial.print("[API] Host: ");
-  Serial.println(apiHost);
+  if (!parseServerUrl(serverUrl.c_str())) {
+    if (LOG_LEVEL >= LOG_LEVEL_ERROR) {
+      Serial.println("[API] Server URL parse failed");
+    }
+  }
 
-  Serial.print("[API] Port: ");
-  Serial.println(apiPort);
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] Host: ");
+    Serial.println(apiHost);
 
-  Serial.print("[API] Base path: ");
-  Serial.println(apiBasePath);
+    Serial.print("[API] Port: ");
+    Serial.println(apiPort);
+
+    Serial.print("[API] Base path: ");
+    Serial.println(apiBasePath);
+  }
 }
 
 GateCommand pollGateCommand() {
@@ -367,7 +389,11 @@ GateCommand pollGateCommand() {
 
   if (WiFi.status() != WL_CONNECTED) {
     result.httpCode = -1;
-    Serial.println("[API] WiFi not connected");
+
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] WiFi not connected");
+    }
+
     return result;
   }
 
@@ -376,8 +402,10 @@ GateCommand pollGateCommand() {
 
   buildPollPath(path, sizeof(path));
 
-  Serial.print("[API] Poll ");
-  Serial.println(path);
+  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+    Serial.print("[API] Poll ");
+    Serial.println(path);
+  }
 
   int httpCode = 0;
 
@@ -385,38 +413,55 @@ GateCommand pollGateCommand() {
 
   result.httpCode = httpCode;
 
-  Serial.print("[API] HTTP ");
-  Serial.println(httpCode);
+  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+    Serial.print("[API] HTTP ");
+    Serial.println(httpCode);
+  }
 
-  if (payload[0] != '\0') {
+  if (payload[0] != '\0' && LOG_LEVEL >= LOG_LEVEL_DEBUG) {
     Serial.print("[API] Payload: ");
     Serial.println(payload);
   }
 
   if (httpCode < 200 || httpCode >= 300) {
-    Serial.println("[API] Non-2xx response, ignored");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.print("[API] Non-2xx response, HTTP ");
+      Serial.println(httpCode);
+    }
+
     return result;
   }
 
   char command[32];
 
   if (!extractJsonString(payload, "command", command, sizeof(command))) {
-    Serial.println("[API] Missing command field");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] Missing command field");
+    }
+
     return result;
   }
 
-  Serial.print("[API] Parsed command: ");
-  Serial.println(command);
-
   if (strcmp(command, "none") == 0) {
-    Serial.println("[API] No command");
+    if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+      Serial.println("[API] No command");
+    }
+
     return result;
+  }
+
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] Command received: ");
+    Serial.println(command);
   }
 
   uint8_t target = targetFromCommand(command);
 
   if (target == GATE_TARGET_NONE) {
-    Serial.println("[API] Unknown command");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] Unknown command");
+    }
+
     return result;
   }
 
@@ -437,26 +482,34 @@ GateCommand pollGateCommand() {
 
   result.relayTimeMs = relayMs;
 
-  Serial.print("[API] Command target: ");
-  Serial.println(result.target);
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] Command target: ");
+    Serial.println(result.target);
 
-  Serial.print("[API] Command ID: ");
-  Serial.println(result.commandId);
+    Serial.print("[API] Command ID: ");
+    Serial.println(result.commandId);
 
-  Serial.print("[API] Relay ms: ");
-  Serial.println(result.relayTimeMs);
+    Serial.print("[API] Relay ms: ");
+    Serial.println(result.relayTimeMs);
+  }
 
   return result;
 }
 
 bool ackGateCommand(const char *commandId, const char *status) {
   if (commandId == nullptr || commandId[0] == '\0') {
-    Serial.println("[API] ACK skipped, missing command_id");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] ACK skipped, missing command_id");
+    }
+
     return false;
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[API] ACK failed, WiFi not connected");
+    if (LOG_LEVEL >= LOG_LEVEL_WARN) {
+      Serial.println("[API] ACK failed, WiFi not connected");
+    }
+
     return false;
   }
 
@@ -475,19 +528,28 @@ bool ackGateCommand(const char *commandId, const char *status) {
     status
   );
 
-  Serial.print("[API] ACK ");
-  Serial.println(path);
-  Serial.print("[API] ACK body ");
-  Serial.println(body);
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] ACK command_id=");
+    Serial.println(commandId);
+  }
+
+  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
+    Serial.print("[API] ACK path ");
+    Serial.println(path);
+    Serial.print("[API] ACK body ");
+    Serial.println(body);
+  }
 
   int httpCode = 0;
 
   rawHttpRequest("POST", path, body, httpCode, payload, sizeof(payload));
 
-  Serial.print("[API] ACK HTTP ");
-  Serial.println(httpCode);
+  if (LOG_LEVEL >= LOG_LEVEL_INFO) {
+    Serial.print("[API] ACK HTTP ");
+    Serial.println(httpCode);
+  }
 
-  if (payload[0] != '\0') {
+  if (payload[0] != '\0' && LOG_LEVEL >= LOG_LEVEL_DEBUG) {
     Serial.print("[API] ACK payload: ");
     Serial.println(payload);
   }
