@@ -81,6 +81,17 @@ def now_iso() -> str:
     return now_utc().isoformat()
 
 
+
+def format_dt(value) -> str:
+    if value is None:
+        return ""
+
+    # SQLite zwraca naive datetime. Traktujemy go jako UTC.
+    if getattr(value, "tzinfo", None) is None:
+        value = value.replace(tzinfo=ZoneInfo("UTC"))
+
+    return value.astimezone(APP_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
 def public_path(path: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
@@ -2637,6 +2648,7 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
 
 
 
