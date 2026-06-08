@@ -1,3 +1,7 @@
+﻿param(
+    [Parameter(Position = 0)]
+    [string]$CommitMessage
+)
 Write-Host "Gate Control deploy" -ForegroundColor Cyan
 Write-Host "===================" -ForegroundColor Cyan
 
@@ -7,7 +11,11 @@ Write-Host ""
 Write-Host "Local git status:" -ForegroundColor Cyan
 git status
 
-$commitMessage = Read-Host "Commit message"
+if ([string]::IsNullOrWhiteSpace($CommitMessage)) {
+    $CommitMessage = Read-Host "Commit message"
+}
+
+$commitMessage = $CommitMessage
 
 if ([string]::IsNullOrWhiteSpace($commitMessage)) {
     Write-Host "Commit message is empty. Stopping." -ForegroundColor Red
