@@ -12,6 +12,7 @@
 DeviceConfig deviceConfig;
 
 unsigned long lastPollAt = 0;
+uint8_t apiFailCount = 0;
 
 static bool isBootButtonPressed() {
   return digitalRead(BOOT_BUTTON_PIN) == LOW;
@@ -31,6 +32,53 @@ static void printStartupInfo() {
   Serial.print("Gate 2 output GPIO: ");
   Serial.println(GATE2_OUTPUT_PIN);
   Serial.println();
+}
+
+static void printWifiInfo() {
+  Serial.println("[WIFI] Network info:");
+
+  Serial.print("[WIFI] SSID: ");
+  Serial.println(WiFi.SSID());
+
+  Serial.print("[WIFI] IP: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.print("[WIFI] Gateway: ");
+  Serial.println(WiFi.gatewayIP());
+
+  Serial.print("[WIFI] DNS: ");
+  Serial.println(WiFi.dnsIP());
+
+  Serial.print("[WIFI] RSSI: ");
+  Serial.println(WiFi.RSSI());
+
+  IPAddress resolvedIp;
+  bool dnsOk = WiFi.hostByName("tools.malmaz.com", resolvedIp);
+
+  Serial.print("[DNS] tools.malmaz.com: ");
+  if (dnsOk) {
+    Serial.println(resolvedIp);
+  } else {
+    Serial.println("FAILED");
+  }
+}
+
+static void reconnectWifiAndApi() {
+  Serial.println("[MAIN] Reconnecting WiFi and API client");
+
+  WiFi.disconnect();
+  delay(1200);
+
+  bool wifiOk = connectToConfiguredWiFi(deviceConfig);
+
+  if (wifiOk) {
+    printWifiInfo();
+    setupApiClient(deviceConfig);
+    apiFailCount = 0;
+    Serial.println("[MAIN] WiFi/API reconnect OK");
+  } else {
+    Serial.println("[MAIN] WiFi reconnect failed");
+  }
 }
 
 void setup() {
@@ -88,6 +136,7 @@ void setup() {
     }
   }
 
+  printWifiInfo();
   setupApiClient(deviceConfig);
 
   Serial.println("[BOOT] Ready");
@@ -100,7 +149,7 @@ void loop() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WIFI] Lost connection, reconnecting");
-    connectToConfiguredWiFi(deviceConfig);
+    reconnectWifiAndApi();
   }
 
   unsigned long now = millis();
@@ -110,14 +159,49 @@ void loop() {
 
     GateCommand command = pollGateCommand();
 
+    if (command.httpCode < 0 || command.httpCode >= 500) {
+      apiFailCount++;
+
+      Serial.print("[MAIN] API fail count=");
+      Serial.println(apiFailCount);
+
+      if (apiFailCount >= 5) {
+        Serial.println("[MAIN] Too many API failures");
+        reconnectWifiAndApi();
+      }
+    } else {
+      if (apiFailCount > 0) {
+        Serial.println("[MAIN] API recovered");
+      }
+
+      apiFailCount = 0;
+    }
+
     if (command.shouldOpen) {
       Serial.print("[MAIN] OPEN command received, target=");
       Serial.println(command.target);
 
+      Serial.print("[MAIN] command_id=");
+      Serial.println(command.commandId);
+
+      Serial.print("[MAIN] relayTimeMs=");
+      Serial.println(command.relayTimeMs);
+
+      Serial.println("[MAIN] BEFORE triggerGate");
+      delay(100);
+
       triggerGate(command.target, command.relayTimeMs);
 
+      Serial.println("[MAIN] AFTER triggerGate");
+      delay(100);
+
       if (command.commandId[0] != '\0') {
-        ackGateCommand(command.commandId, "done");
+        Serial.println("[MAIN] BEFORE ackGateCommand");
+
+        bool ackOk = ackGateCommand(command.commandId, "done");
+
+        Serial.print("[MAIN] AFTER ackGateCommand, ok=");
+        Serial.println(ackOk ? "true" : "false");
       }
     } else {
       blinkDebugLedOnce();
