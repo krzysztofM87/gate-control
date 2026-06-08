@@ -1369,6 +1369,8 @@ def client_pilot_page(
         </button>
         """
 
+    max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
+
     body = f"""
 <!doctype html>
 <html lang="pl">
@@ -1378,13 +1380,6 @@ def client_pilot_page(
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
-        :root {{
-            --bg: #111;
-            --panel: #222;
-            --text: #f4f4f4;
-            --muted: #aaa;
-        }}
-
         * {{
             box-sizing: border-box;
         }}
@@ -1394,7 +1389,7 @@ def client_pilot_page(
             min-height: 100vh;
             font-family: Arial, sans-serif;
             background: radial-gradient(circle at top, #333 0, #111 48%, #050505 100%);
-            color: var(--text);
+            color: #f4f4f4;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1426,7 +1421,7 @@ def client_pilot_page(
         }}
 
         .remote-subtitle {{
-            color: var(--muted);
+            color: #aaa;
             font-size: 13px;
             margin-top: 7px;
             line-height: 1.35;
@@ -1439,7 +1434,7 @@ def client_pilot_page(
             padding: 13px 12px;
             margin-bottom: 14px;
             text-align: center;
-            color: var(--muted);
+            color: #aaa;
             border: 1px solid rgba(255,255,255,.08);
             font-size: 14px;
             line-height: 1.35;
@@ -1578,7 +1573,7 @@ def client_pilot_page(
 
         <div class="footer">
             Ważny do: {html.escape(token.valid_to.isoformat())}<br>
-            Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}
+            Użycia: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span>
         </div>
     </main>
 
@@ -1591,9 +1586,30 @@ def client_pilot_page(
         const stepSent = document.getElementById("step-sent");
         const stepDone = document.getElementById("step-done");
 
+        const usageCountEl = document.getElementById("usage-count");
+        const usageMaxEl = document.getElementById("usage-max");
+
+        let readyTimer = null;
+
         function setStatus(text, mode) {{
             statusEl.textContent = text;
             statusEl.className = "status" + (mode ? " " + mode : "");
+        }}
+
+        function clearReadyTimer() {{
+            if (readyTimer) {{
+                clearTimeout(readyTimer);
+                readyTimer = null;
+            }}
+        }}
+
+        function scheduleReady() {{
+            clearReadyTimer();
+
+            readyTimer = setTimeout(() => {{
+                resetSteps();
+                setStatus("Gotowy", "");
+            }}, 2500);
         }}
 
         function resetSteps() {{
@@ -1609,6 +1625,20 @@ def client_pilot_page(
         function setBusy(isBusy) {{
             buttons.forEach(button => button.disabled = isBusy);
             ledEl.classList.toggle("on", isBusy);
+        }}
+
+        function updateUsage(data) {{
+            if (!data) {{
+                return;
+            }}
+
+            if (typeof data.used_count !== "undefined" && data.used_count !== null) {{
+                usageCountEl.textContent = data.used_count;
+            }}
+
+            if (typeof data.max_uses !== "undefined") {{
+                usageMaxEl.textContent = data.max_uses === null ? "bez limitu" : data.max_uses;
+            }}
         }}
 
         async function checkCommandStatus(statusUrl) {{
@@ -1633,6 +1663,7 @@ def client_pilot_page(
 
             for (let attempt = 0; attempt < maxAttempts; attempt++) {{
                 const data = await checkCommandStatus(statusUrl);
+                updateUsage(data);
 
                 if (data.status === "pending") {{
                     setStep(stepCreated, "done");
@@ -1657,6 +1688,7 @@ def client_pilot_page(
                         navigator.vibrate([60, 40, 60]);
                     }}
 
+                    scheduleReady();
                     return;
                 }}
 
@@ -1672,6 +1704,7 @@ def client_pilot_page(
         }}
 
         async function pressButton(url, label) {{
+            clearReadyTimer();
             resetSteps();
             setBusy(true);
             setStatus("Wysyłam polecenie: " + label + "...", "wait");
@@ -1685,6 +1718,7 @@ def client_pilot_page(
                 }});
 
                 const data = await response.json();
+                updateUsage(data);
 
                 if (!response.ok) {{
                     const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
@@ -1700,12 +1734,14 @@ def client_pilot_page(
                         await watchCommandStatus(data.status_url);
                     }} else {{
                         setStatus("Polecenie wysłane: " + data.command, "ok");
+                        scheduleReady();
                     }}
 
                     return;
                 }}
 
                 setStatus("Polecenie wysłane", "ok");
+                scheduleReady();
             }} catch (err) {{
                 setStatus("Błąd: " + err.message, "err");
             }} finally {{
@@ -1744,12 +1780,17 @@ def client_pilot_press(
         request=request,
     )
 
+    db.refresh(token)
+
     return {
         "status": "ok",
         "command": command.command,
         "command_id": command.command_id,
         "relay_time_ms": command.relay_time_ms,
         "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "token_status": token.status,
     }
 
 
@@ -1782,4 +1823,7 @@ def client_pilot_command_status(
         "created_at": command.created_at.isoformat() if command.created_at else None,
         "sent_at": command.sent_at.isoformat() if command.sent_at else None,
         "ack_at": command.ack_at.isoformat() if command.ack_at else None,
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "token_status": token.status,
     }
