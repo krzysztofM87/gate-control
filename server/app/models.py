@@ -30,6 +30,13 @@ class AccessToken(Base):
     token_value = Column(String(255), unique=True, index=True, nullable=False)
 
     label = Column(String(255), nullable=True)
+
+    # Pola wyglądu pilota / etykiet przycisków
+    pilot_title = Column(String(255), nullable=True)
+    button_1_label = Column(String(120), nullable=True)
+    button_2_label = Column(String(120), nullable=True)
+    button_both_label = Column(String(120), nullable=True)
+
     device_id = Column(String(120), index=True, nullable=False)
 
     gate_target = Column(String(40), default="open_1", nullable=False)
