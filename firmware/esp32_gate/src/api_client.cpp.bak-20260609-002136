@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <string.h>
@@ -88,18 +88,14 @@ static bool parseServerUrl(const char *url) {
 static bool readHttpLine(WiFiClient &client, char *line, size_t lineSize, unsigned long timeoutMs) {
   size_t pos = 0;
   unsigned long start = millis();
-  unsigned long lastActivity = start;
 
   if (lineSize == 0) {
     return false;
   }
 
-  line[0] = '\0';
-
   while (millis() - start < timeoutMs) {
     while (client.available()) {
       char c = (char)client.read();
-      lastActivity = millis();
 
       if (c == '\r') {
         continue;
@@ -112,22 +108,14 @@ static bool readHttpLine(WiFiClient &client, char *line, size_t lineSize, unsign
 
       if (pos < lineSize - 1) {
         line[pos++] = c;
-        line[pos] = '\0';
       }
     }
 
     if (!client.connected() && !client.available()) {
-      if (pos > 0) {
-        line[pos] = '\0';
-        return true;
-      }
-
-      if (millis() - lastActivity > 600) {
-        break;
-      }
+      break;
     }
 
-    delay(5);
+    delay(1);
   }
 
   line[pos] = '\0';
@@ -168,30 +156,7 @@ static bool rawHttpRequest(
     Serial.println(apiPort);
   }
 
-  IPAddress remoteIp;
-  bool dnsOk = WiFi.hostByName(apiHost, remoteIp);
-
-  if (LOG_LEVEL >= LOG_LEVEL_DEBUG) {
-    Serial.print("[HTTP] DNS ");
-    Serial.print(apiHost);
-    Serial.print(" -> ");
-
-    if (dnsOk) {
-      Serial.println(remoteIp);
-    } else {
-      Serial.println("FAILED");
-    }
-  }
-
-  bool connected = false;
-
-  if (dnsOk) {
-    connected = client.connect(remoteIp, apiPort);
-  } else {
-    connected = client.connect(apiHost, apiPort);
-  }
-
-  if (!connected) {
+  if (!client.connect(apiHost, apiPort)) {
     if (LOG_LEVEL >= LOG_LEVEL_WARN) {
       Serial.println("[HTTP] Connect failed");
     }
@@ -204,13 +169,10 @@ static bool rawHttpRequest(
   client.print(method);
   client.print(" ");
   client.print(path);
-  client.println(" HTTP/1.1");
+  client.println(" HTTP/1.0");
 
   client.print("Host: ");
   client.println(apiHost);
-
-  client.println("User-Agent: ESP32-Gate/1.0");
-  client.println("Accept: application/json");
 
   client.print("X-Device-Id: ");
   client.println(apiDeviceId);
@@ -274,7 +236,7 @@ static bool rawHttpRequest(
       break;
     }
 
-    delay(5);
+    delay(1);
   }
 
   if (payloadSize > 0) {
@@ -282,7 +244,7 @@ static bool rawHttpRequest(
   }
 
   client.stop();
-  delay(80);
+  delay(50);
 
   return httpCode >= 100;
 }
@@ -446,29 +408,8 @@ GateCommand pollGateCommand() {
   }
 
   int httpCode = 0;
-  bool requestOk = false;
 
-  for (uint8_t attempt = 0; attempt <= HTTP_RETRY_COUNT; attempt++) {
-    payload[0] = '\0';
-    httpCode = 0;
-
-    requestOk = rawHttpRequest("GET", path, "", httpCode, payload, sizeof(payload));
-
-    if (requestOk && httpCode >= 200 && httpCode < 500) {
-      break;
-    }
-
-    if (attempt < HTTP_RETRY_COUNT) {
-      if (LOG_LEVEL >= LOG_LEVEL_WARN) {
-        Serial.print("[API] Poll transient error, retry ");
-        Serial.print(attempt + 1);
-        Serial.print("/");
-        Serial.println(HTTP_RETRY_COUNT);
-      }
-
-      delay(HTTP_RETRY_DELAY_MS);
-    }
-  }
+  rawHttpRequest("GET", path, "", httpCode, payload, sizeof(payload));
 
   result.httpCode = httpCode;
 
@@ -600,29 +541,8 @@ bool ackGateCommand(const char *commandId, const char *status) {
   }
 
   int httpCode = 0;
-  bool requestOk = false;
 
-  for (uint8_t attempt = 0; attempt <= HTTP_RETRY_COUNT; attempt++) {
-    payload[0] = '\0';
-    httpCode = 0;
-
-    requestOk = rawHttpRequest("POST", path, body, httpCode, payload, sizeof(payload));
-
-    if (requestOk && httpCode >= 200 && httpCode < 500) {
-      break;
-    }
-
-    if (attempt < HTTP_RETRY_COUNT) {
-      if (LOG_LEVEL >= LOG_LEVEL_WARN) {
-        Serial.print("[API] ACK transient error, retry ");
-        Serial.print(attempt + 1);
-        Serial.print("/");
-        Serial.println(HTTP_RETRY_COUNT);
-      }
-
-      delay(HTTP_RETRY_DELAY_MS);
-    }
-  }
+  rawHttpRequest("POST", path, body, httpCode, payload, sizeof(payload));
 
   if (LOG_LEVEL >= LOG_LEVEL_INFO) {
     Serial.print("[API] ACK HTTP ");
