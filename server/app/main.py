@@ -454,7 +454,7 @@ def render_page(title: str, body: str) -> str:
             color: #888;
             word-break: break-all;
         }}
-            .admin-nav {
+            .admin-nav {{
             position: sticky;
             top: 0;
             z-index: 100;
@@ -467,9 +467,9 @@ def render_page(title: str, body: str) -> str:
             gap: 8px;
             flex-wrap: wrap;
             align-items: center;
-        }
+        }}
 
-        .admin-nav a {
+        .admin-nav a {{
             display: inline-block;
             color: white;
             text-decoration: none;
@@ -477,26 +477,26 @@ def render_page(title: str, body: str) -> str:
             border-radius: 8px;
             background: #333;
             font-size: 14px;
-        }
+        }}
 
-        .admin-nav a:hover {
+        .admin-nav a:hover {{
             background: #444;
-        }
+        }}
 
-        .admin-nav .brand {
+        .admin-nav .brand {{
             font-weight: bold;
             background: #111;
-        }
+        }}
 
-        @media (max-width: 700px) {
-            .admin-nav {
+        @media (max-width: 700px) {{
+            .admin-nav {{
                 position: static;
-            }
+            }}
 
-            .admin-nav a {
+            .admin-nav a {{
                 width: 100%;
-            }
-        }
+            }}
+        }}
     </style>
 </head>
 <body>
@@ -2611,6 +2611,7 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
 
 
 
