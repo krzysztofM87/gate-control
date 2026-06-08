@@ -1381,11 +1381,8 @@ def client_pilot_page(
         :root {{
             --bg: #111;
             --panel: #222;
-            --panel2: #2c2c2c;
             --text: #f4f4f4;
             --muted: #aaa;
-            --ok: #1d7f3a;
-            --err: #8a1f1f;
         }}
 
         * {{
@@ -1436,15 +1433,16 @@ def client_pilot_page(
         }}
 
         .status {{
-            min-height: 46px;
+            min-height: 58px;
             background: #101010;
             border-radius: 16px;
             padding: 13px 12px;
-            margin-bottom: 20px;
+            margin-bottom: 14px;
             text-align: center;
             color: var(--muted);
             border: 1px solid rgba(255,255,255,.08);
             font-size: 14px;
+            line-height: 1.35;
         }}
 
         .status.ok {{
@@ -1452,9 +1450,36 @@ def client_pilot_page(
             border-color: rgba(75, 255, 120, .3);
         }}
 
+        .status.wait {{
+            color: #ffe9a6;
+            border-color: rgba(255, 220, 80, .35);
+        }}
+
         .status.err {{
             color: #ffc1c1;
             border-color: rgba(255, 80, 80, .35);
+        }}
+
+        .steps {{
+            display: grid;
+            gap: 6px;
+            margin-bottom: 18px;
+            font-size: 13px;
+            color: #777;
+        }}
+
+        .step {{
+            background: rgba(255,255,255,.04);
+            border-radius: 10px;
+            padding: 8px 10px;
+        }}
+
+        .step.active {{
+            color: #ffe9a6;
+        }}
+
+        .step.done {{
+            color: #b7ffc9;
         }}
 
         .buttons {{
@@ -1541,6 +1566,12 @@ def client_pilot_page(
             Gotowy
         </div>
 
+        <div class="steps">
+            <div id="step-created" class="step">1. Komenda zapisana na serwerze</div>
+            <div id="step-sent" class="step">2. Sterownik odebrał komendę</div>
+            <div id="step-done" class="step">3. Sterownik potwierdził wykonanie</div>
+        </div>
+
         <div class="buttons">
             {buttons_html}
         </div>
@@ -1556,9 +1587,23 @@ def client_pilot_page(
         const ledEl = document.getElementById("led");
         const buttons = Array.from(document.querySelectorAll(".remote-button"));
 
+        const stepCreated = document.getElementById("step-created");
+        const stepSent = document.getElementById("step-sent");
+        const stepDone = document.getElementById("step-done");
+
         function setStatus(text, mode) {{
             statusEl.textContent = text;
             statusEl.className = "status" + (mode ? " " + mode : "");
+        }}
+
+        function resetSteps() {{
+            [stepCreated, stepSent, stepDone].forEach(step => {{
+                step.className = "step";
+            }});
+        }}
+
+        function setStep(step, state) {{
+            step.className = "step " + state;
         }}
 
         function setBusy(isBusy) {{
@@ -1566,9 +1611,70 @@ def client_pilot_page(
             ledEl.classList.toggle("on", isBusy);
         }}
 
+        async function checkCommandStatus(statusUrl) {{
+            const response = await fetch(statusUrl, {{
+                method: "GET",
+                headers: {{
+                    "X-Requested-With": "fetch"
+                }}
+            }});
+
+            const data = await response.json();
+
+            if (!response.ok) {{
+                throw new Error(data.detail || "Błąd statusu HTTP " + response.status);
+            }}
+
+            return data;
+        }}
+
+        async function watchCommandStatus(statusUrl) {{
+            const maxAttempts = 20;
+
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {{
+                const data = await checkCommandStatus(statusUrl);
+
+                if (data.status === "pending") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "active");
+                    setStatus("Komenda zapisana. Czekam aż sterownik ją odbierze...", "wait");
+                }}
+
+                if (data.status === "sent") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "active");
+                    setStatus("Sterownik odebrał komendę. Czekam na potwierdzenie...", "wait");
+                }}
+
+                if (data.status === "done") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "done");
+                    setStatus("Wykonano. Sterownik potwierdził komendę.", "ok");
+
+                    if (navigator.vibrate) {{
+                        navigator.vibrate([60, 40, 60]);
+                    }}
+
+                    return;
+                }}
+
+                if (data.status !== "pending" && data.status !== "sent" && data.status !== "done") {{
+                    setStatus("Status komendy: " + data.status, "err");
+                    return;
+                }}
+
+                await new Promise(resolve => setTimeout(resolve, 700));
+            }}
+
+            setStatus("Komenda wysłana, ale brak potwierdzenia w oczekiwanym czasie.", "err");
+        }}
+
         async function pressButton(url, label) {{
+            resetSteps();
             setBusy(true);
-            setStatus("Wysyłam polecenie: " + label + "...", "");
+            setStatus("Wysyłam polecenie: " + label + "...", "wait");
 
             try {{
                 const response = await fetch(url, {{
@@ -1578,14 +1684,7 @@ def client_pilot_page(
                     }}
                 }});
 
-                let data = null;
-                const text = await response.text();
-
-                try {{
-                    data = JSON.parse(text);
-                }} catch (e) {{
-                    data = null;
-                }}
+                const data = await response.json();
 
                 if (!response.ok) {{
                     const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
@@ -1594,10 +1693,13 @@ def client_pilot_page(
                 }}
 
                 if (data && data.status === "ok") {{
-                    setStatus("Polecenie wysłane: " + data.command, "ok");
+                    setStep(stepCreated, "done");
+                    setStatus("Komenda zapisana na serwerze.", "wait");
 
-                    if (navigator.vibrate) {{
-                        navigator.vibrate(80);
+                    if (data.status_url) {{
+                        await watchCommandStatus(data.status_url);
+                    }} else {{
+                        setStatus("Polecenie wysłane: " + data.command, "ok");
                     }}
 
                     return;
@@ -1605,11 +1707,11 @@ def client_pilot_page(
 
                 setStatus("Polecenie wysłane", "ok");
             }} catch (err) {{
-                setStatus("Błąd połączenia z serwerem", "err");
+                setStatus("Błąd: " + err.message, "err");
             }} finally {{
                 setTimeout(() => {{
                     setBusy(false);
-                }}, 900);
+                }}, 700);
             }}
         }}
 
@@ -1647,4 +1749,37 @@ def client_pilot_press(
         "command": command.command,
         "command_id": command.command_id,
         "relay_time_ms": command.relay_time_ms,
+        "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
+    }
+
+
+@app.get("/pilot/{token_value}/command/{command_id}/status")
+def client_pilot_command_status(
+    token_value: str,
+    command_id: str,
+    db: Session = Depends(get_db),
+):
+    token = db.query(AccessToken).filter(AccessToken.token_value == token_value).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    command = (
+        db.query(Command)
+        .filter(Command.command_id == command_id)
+        .filter(Command.token_id == token.id)
+        .first()
+    )
+
+    if command is None:
+        raise HTTPException(status_code=404, detail="Command not found")
+
+    return {
+        "command_id": command.command_id,
+        "command": command.command,
+        "status": command.status,
+        "delivered_count": command.delivered_count,
+        "created_at": command.created_at.isoformat() if command.created_at else None,
+        "sent_at": command.sent_at.isoformat() if command.sent_at else None,
+        "ack_at": command.ack_at.isoformat() if command.ack_at else None,
     }
