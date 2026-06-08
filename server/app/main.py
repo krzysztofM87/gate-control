@@ -1184,6 +1184,17 @@ def admin_panel(
     </div>
 
     <div class="card">
+        <h2>Nawigacja</h2>
+        <p>
+            <a href="{public_path('/admin-panel/devices')}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#222;color:white;text-decoration:none;margin-right:8px;margin-top:8px;">
+                Urządzenia ESP32
+            </a>
+            <a href="{public_path('/admin-panel')}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#444;color:white;text-decoration:none;margin-right:8px;margin-top:8px;">
+                Piloty / tokeny
+            </a>
+        </p>
+    </div>
+    <div class="card">
         <h2>Utwórz pilota / link</h2>
 
         <form method="post" action="{public_path('/admin-panel/tokens')}">
@@ -2478,4 +2489,5 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
 
