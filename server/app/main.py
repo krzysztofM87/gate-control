@@ -1949,3 +1949,187 @@ def admin_delete_all_tokens(
         "cancelled_commands": cancelled_commands,
     }
 
+
+
+# ===== Multi device admin panel =====
+
+@app.get("/admin/devices")
+def admin_list_devices(
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    devices = (
+        db.query(Device)
+        .order_by(Device.created_at.desc())
+        .all()
+    )
+
+    return {
+        "devices": [
+            {
+                "id": device.id,
+                "device_id": device.device_id,
+                "name": device.name,
+                "is_active": device.is_active,
+                "created_at": device.created_at.isoformat() if device.created_at else None,
+                "updated_at": device.updated_at.isoformat() if device.updated_at else None,
+                "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
+                "has_secret": bool(device.secret),
+            }
+            for device in devices
+        ]
+    }
+
+
+@app.get("/admin-panel/devices", response_class=HTMLResponse)
+def admin_panel_devices(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    devices = (
+        db.query(Device)
+        .order_by(Device.created_at.desc())
+        .all()
+    )
+
+    rows = ""
+
+    for device in devices:
+        rows += f"""
+        <tr>
+            <td>{device.id}</td>
+            <td><code>{html.escape(device.device_id)}</code></td>
+            <td>{html.escape(device.name or "")}</td>
+            <td>{'tak' if device.is_active else 'nie'}</td>
+            <td>{html.escape(device.last_seen_at.isoformat()) if device.last_seen_at else ""}</td>
+            <td>{html.escape(device.created_at.isoformat()) if device.created_at else ""}</td>
+        </tr>
+        """
+
+    if not rows:
+        rows = "<tr><td colspan='6'>Brak urządzeń.</td></tr>"
+
+    body = f"""
+    <div class="top">
+        <h1>Urządzenia ESP32</h1>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+
+    <div class="card">
+        <h2>Dodaj urządzenie</h2>
+        <p class="muted">
+            Każde ESP32 powinno mieć własny identyfikator i sekret.
+            Tego sekretu używasz potem w konfiguracji terminalowej ESP32.
+        </p>
+
+        <form method="post" action="{public_path('/admin-panel/devices')}">
+            <label>ID urządzenia</label>
+            <input name="device_id" placeholder="np. gate-plocka-1" required>
+
+            <label>Nazwa opisowa</label>
+            <input name="name" placeholder="np. Brama Płocka 1">
+
+            <label>Sekret urządzenia</label>
+            <input name="secret" placeholder="zostaw puste, aby wygenerować automatycznie">
+
+            <button type="submit">Dodaj / zaktualizuj urządzenie</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Lista urządzeń</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Device ID</th>
+                    <th>Nazwa</th>
+                    <th>Aktywne</th>
+                    <th>Ostatnio widziane</th>
+                    <th>Utworzono</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Urządzenia ESP32", body))
+
+
+@app.post("/admin-panel/devices", response_class=HTMLResponse)
+async def admin_panel_save_device(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    form = await request.form()
+
+    device_id = str(form.get("device_id") or "").strip()
+    name = str(form.get("name") or "").strip()
+    secret = str(form.get("secret") or "").strip()
+
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+
+    generated_secret = False
+
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        generated_secret = True
+
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if device is None:
+        device = Device(
+            device_id=device_id,
+            name=name,
+            secret=secret,
+            is_active=True,
+        )
+        db.add(device)
+    else:
+        device.name = name
+        device.secret = secret
+        device.is_active = True
+
+    db.commit()
+    db.refresh(device)
+
+    body = f"""
+    <div class="card">
+        <h1>Urządzenie zapisane</h1>
+        <p><strong>{html.escape(device.name or device.device_id)}</strong></p>
+
+        <p>Device ID:</p>
+        <p><code>{html.escape(device.device_id)}</code></p>
+
+        <p>Sekret urządzenia:</p>
+        <p><code>{html.escape(secret)}</code></p>
+
+        <p class="muted">
+            Skopiuj ten sekret teraz. Jeśli był wygenerowany automatycznie, traktuj go jak hasło.
+        </p>
+
+        <h2>Konfiguracja ESP32 przez terminal</h2>
+        <p>W Serial Monitorze ESP32 wpisz:</p>
+
+        <p><code>device {html.escape(device.device_id)}|{html.escape(secret)}</code></p>
+        <p><code>server http://tools.malmaz.com/gate-control</code></p>
+        <p><code>save</code></p>
+        <p><code>reboot</code></p>
+
+        <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Urządzenie zapisane", body))
