@@ -1950,8 +1950,33 @@ def admin_delete_all_tokens(
     }
 
 
-
 # ===== Multi device admin panel =====
+
+def device_or_404(db: Session, device_id: str) -> Device:
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    return device
+
+
+def device_counts(db: Session, device_id: str) -> dict:
+    tokens_count = db.query(AccessToken).filter(AccessToken.device_id == device_id).count()
+    pending_count = (
+        db.query(Command)
+        .filter(Command.device_id == device_id)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .count()
+    )
+    all_commands_count = db.query(Command).filter(Command.device_id == device_id).count()
+
+    return {
+        "tokens": tokens_count,
+        "pending_or_sent_commands": pending_count,
+        "all_commands": all_commands_count,
+    }
+
 
 @app.get("/admin/devices")
 def admin_list_devices(
@@ -1977,6 +2002,7 @@ def admin_list_devices(
                 "updated_at": device.updated_at.isoformat() if device.updated_at else None,
                 "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
                 "has_secret": bool(device.secret),
+                "counts": device_counts(db, device.device_id),
             }
             for device in devices
         ]
@@ -2000,19 +2026,34 @@ def admin_panel_devices(
     rows = ""
 
     for device in devices:
+        counts = device_counts(db, device.device_id)
+
+        status_text = "aktywne" if device.is_active else "wyłączone"
+        toggle_text = "Dezaktywuj" if device.is_active else "Aktywuj"
+
         rows += f"""
         <tr>
             <td>{device.id}</td>
             <td><code>{html.escape(device.device_id)}</code></td>
             <td>{html.escape(device.name or "")}</td>
-            <td>{'tak' if device.is_active else 'nie'}</td>
+            <td>{status_text}</td>
+            <td>{counts["tokens"]}</td>
+            <td>{counts["pending_or_sent_commands"]}</td>
             <td>{html.escape(device.last_seen_at.isoformat()) if device.last_seen_at else ""}</td>
-            <td>{html.escape(device.created_at.isoformat()) if device.created_at else ""}</td>
+            <td>
+                <a href="{public_path(f'/admin-panel/devices/{device.device_id}/edit')}">edytuj</a>
+                <br>
+                <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/toggle')}" style="display:inline">
+                    <button type="submit">{toggle_text}</button>
+                </form>
+                <br>
+                <a href="{public_path(f'/admin-panel/devices/{device.device_id}/delete')}">usuń</a>
+            </td>
         </tr>
         """
 
     if not rows:
-        rows = "<tr><td colspan='6'>Brak urządzeń.</td></tr>"
+        rows = "<tr><td colspan='8'>Brak urządzeń.</td></tr>"
 
     body = f"""
     <div class="top">
@@ -2049,9 +2090,11 @@ def admin_panel_devices(
                     <th>ID</th>
                     <th>Device ID</th>
                     <th>Nazwa</th>
-                    <th>Aktywne</th>
+                    <th>Status</th>
+                    <th>Tokeny</th>
+                    <th>Komendy oczekujące/wysłane</th>
                     <th>Ostatnio widziane</th>
-                    <th>Utworzono</th>
+                    <th>Akcje</th>
                 </tr>
             </thead>
             <tbody>
@@ -2081,11 +2124,8 @@ async def admin_panel_save_device(
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id is required")
 
-    generated_secret = False
-
     if not secret:
         secret = secrets.token_urlsafe(32)
-        generated_secret = True
 
     device = db.query(Device).filter(Device.device_id == device_id).first()
 
@@ -2097,17 +2137,28 @@ async def admin_panel_save_device(
             is_active=True,
         )
         db.add(device)
+        action = "utworzone"
     else:
         device.name = name
         device.secret = secret
         device.is_active = True
+        action = "zaktualizowane"
+
+    log_event(
+        db,
+        event_type="device_saved",
+        request=request,
+        status="ok",
+        device_id=device_id,
+        message=f"Device {device_id} {action}",
+    )
 
     db.commit()
     db.refresh(device)
 
     body = f"""
     <div class="card">
-        <h1>Urządzenie zapisane</h1>
+        <h1>Urządzenie {action}</h1>
         <p><strong>{html.escape(device.name or device.device_id)}</strong></p>
 
         <p>Device ID:</p>
@@ -2117,12 +2168,10 @@ async def admin_panel_save_device(
         <p><code>{html.escape(secret)}</code></p>
 
         <p class="muted">
-            Skopiuj ten sekret teraz. Jeśli był wygenerowany automatycznie, traktuj go jak hasło.
+            Skopiuj sekret teraz. Jeśli był wygenerowany automatycznie, traktuj go jak hasło.
         </p>
 
         <h2>Konfiguracja ESP32 przez terminal</h2>
-        <p>W Serial Monitorze ESP32 wpisz:</p>
-
         <p><code>device {html.escape(device.device_id)}|{html.escape(secret)}</code></p>
         <p><code>server http://tools.malmaz.com/gate-control</code></p>
         <p><code>save</code></p>
@@ -2133,3 +2182,350 @@ async def admin_panel_save_device(
     """
 
     return HTMLResponse(admin_panel_page("Urządzenie zapisane", body))
+
+
+@app.get("/admin-panel/devices/{device_id}/edit", response_class=HTMLResponse)
+def admin_panel_edit_device(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    device = device_or_404(db, device_id)
+    counts = device_counts(db, device.device_id)
+
+    body = f"""
+    <div class="top">
+        <h1>Edytuj urządzenie</h1>
+        <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+    </div>
+
+    <div class="card">
+        <h2>{html.escape(device.name or device.device_id)}</h2>
+
+        <p>Device ID:</p>
+        <p><code>{html.escape(device.device_id)}</code></p>
+
+        <p class="muted">
+            Tokeny przypisane: {counts["tokens"]}<br>
+            Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
+            Wszystkie komendy historycznie: {counts["all_commands"]}
+        </p>
+
+        <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/update')}">
+            <label>Nazwa opisowa</label>
+            <input name="name" value="{html.escape(device.name or '')}">
+
+            <label>Nowy sekret urządzenia</label>
+            <input name="secret" placeholder="zostaw puste, aby nie zmieniać">
+
+            <label>
+                <input type="checkbox" name="is_active" value="1" {"checked" if device.is_active else ""} style="width:auto">
+                Urządzenie aktywne
+            </label>
+
+            <button type="submit">Zapisz zmiany</button>
+        </form>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Edytuj urządzenie", body))
+
+
+@app.post("/admin-panel/devices/{device_id}/update", response_class=HTMLResponse)
+async def admin_panel_update_device(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    device = device_or_404(db, device_id)
+    form = await request.form()
+
+    name = str(form.get("name") or "").strip()
+    secret = str(form.get("secret") or "").strip()
+    is_active = bool(form.get("is_active"))
+
+    device.name = name
+    device.is_active = is_active
+
+    if secret:
+        device.secret = secret
+
+    if not is_active:
+        cancelled_commands = (
+            db.query(Command)
+            .filter(Command.device_id == device.device_id)
+            .filter(Command.status.in_(["pending", "sent"]))
+            .update(
+                {
+                    Command.status: "cancelled",
+                    Command.message: "Cancelled because device was deactivated",
+                },
+                synchronize_session=False,
+            )
+        )
+    else:
+        cancelled_commands = 0
+
+    log_event(
+        db,
+        event_type="device_updated",
+        request=request,
+        status="ok",
+        device_id=device.device_id,
+        message=f"Device updated; active={is_active}; cancelled_commands={cancelled_commands}",
+    )
+
+    db.commit()
+
+    body = f"""
+    <div class="card">
+        <h1>Zapisano zmiany</h1>
+        <p>Urządzenie: <code>{html.escape(device.device_id)}</code></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
+        <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Zapisano urządzenie", body))
+
+
+@app.post("/admin-panel/devices/{device_id}/toggle", response_class=HTMLResponse)
+def admin_panel_toggle_device(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    device = device_or_404(db, device_id)
+    device.is_active = not device.is_active
+
+    if not device.is_active:
+        cancelled_commands = (
+            db.query(Command)
+            .filter(Command.device_id == device.device_id)
+            .filter(Command.status.in_(["pending", "sent"]))
+            .update(
+                {
+                    Command.status: "cancelled",
+                    Command.message: "Cancelled because device was deactivated",
+                },
+                synchronize_session=False,
+            )
+        )
+    else:
+        cancelled_commands = 0
+
+    log_event(
+        db,
+        event_type="device_toggled",
+        request=request,
+        status="ok",
+        device_id=device.device_id,
+        message=f"Device active={device.is_active}; cancelled_commands={cancelled_commands}",
+    )
+
+    db.commit()
+
+    body = f"""
+    <div class="card">
+        <h1>Zmieniono status urządzenia</h1>
+        <p>Urządzenie: <code>{html.escape(device.device_id)}</code></p>
+        <p>Status: <strong>{"aktywne" if device.is_active else "wyłączone"}</strong></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
+        <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Zmieniono status urządzenia", body))
+
+
+@app.get("/admin-panel/devices/{device_id}/delete", response_class=HTMLResponse)
+def admin_panel_delete_device_confirm(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    device = device_or_404(db, device_id)
+    counts = device_counts(db, device.device_id)
+
+    body = f"""
+    <div class="card">
+        <h1>Usuń urządzenie</h1>
+
+        <p>Urządzenie:</p>
+        <p><code>{html.escape(device.device_id)}</code></p>
+        <p><strong>{html.escape(device.name or "")}</strong></p>
+
+        <p class="muted">
+            Tokeny przypisane do urządzenia: {counts["tokens"]}<br>
+            Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
+            Wszystkie komendy historycznie: {counts["all_commands"]}
+        </p>
+
+        <p>
+            Usunięcie urządzenia anuluje jego oczekujące/wysłane komendy.
+            Historia komend zostaje w bazie.
+        </p>
+
+        <form method="post" action="{public_path(f'/admin-panel/devices/{device.device_id}/delete')}">
+            <label>Potwierdzenie</label>
+            <input name="confirm" placeholder="Wpisz: USUN" autocomplete="off">
+
+            <label>
+                <input type="checkbox" name="delete_tokens" value="1" style="width:auto">
+                Usuń też tokeny/piloty przypisane do tego urządzenia
+            </label>
+
+            <button class="danger" type="submit">Usuń urządzenie</button>
+        </form>
+
+        <p><a href="{public_path('/admin-panel/devices')}">Anuluj i wróć</a></p>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Usuń urządzenie", body))
+
+
+@app.post("/admin-panel/devices/{device_id}/delete", response_class=HTMLResponse)
+async def admin_panel_delete_device(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    device = device_or_404(db, device_id)
+    form = await request.form()
+
+    confirm = str(form.get("confirm") or "").strip()
+    delete_tokens = bool(form.get("delete_tokens"))
+
+    if confirm != "USUN":
+        body = f"""
+        <div class="card">
+            <h1>Nie usunięto urządzenia</h1>
+            <p>Potwierdzenie było nieprawidłowe. Trzeba wpisać dokładnie: <code>USUN</code></p>
+            <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+        </div>
+        """
+        return HTMLResponse(admin_panel_page("Nie usunięto urządzenia", body))
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.device_id == device.device_id)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because device was deleted",
+            },
+            synchronize_session=False,
+        )
+    )
+
+    if delete_tokens:
+        deleted_tokens = (
+            db.query(AccessToken)
+            .filter(AccessToken.device_id == device.device_id)
+            .delete(synchronize_session=False)
+        )
+    else:
+        deleted_tokens = 0
+
+    deleted_device_id = device.device_id
+    deleted_device_name = device.name or ""
+
+    db.delete(device)
+
+    log_event(
+        db,
+        event_type="device_deleted",
+        request=request,
+        status="ok",
+        device_id=deleted_device_id,
+        message=f"Device deleted; delete_tokens={delete_tokens}; deleted_tokens={deleted_tokens}; cancelled_commands={cancelled_commands}",
+    )
+
+    db.commit()
+
+    body = f"""
+    <div class="card">
+        <h1>Usunięto urządzenie</h1>
+        <p>Device ID: <code>{html.escape(deleted_device_id)}</code></p>
+        <p>Nazwa: {html.escape(deleted_device_name)}</p>
+        <p>Usunięto tokenów: <strong>{deleted_tokens}</strong></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
+        <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
+
+@app.delete("/admin/devices/{device_id}")
+def admin_delete_device_api(
+    device_id: str,
+    delete_tokens: bool = False,
+    confirm: str = "",
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    if confirm != "USUN":
+        raise HTTPException(status_code=400, detail="Confirmation required. Use confirm=USUN")
+
+    device = device_or_404(db, device_id)
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.device_id == device.device_id)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because device was deleted",
+            },
+            synchronize_session=False,
+        )
+    )
+
+    if delete_tokens:
+        deleted_tokens = (
+            db.query(AccessToken)
+            .filter(AccessToken.device_id == device.device_id)
+            .delete(synchronize_session=False)
+        )
+    else:
+        deleted_tokens = 0
+
+    db.delete(device)
+
+    log_event(
+        db,
+        event_type="device_deleted",
+        status="ok",
+        device_id=device_id,
+        message=f"Device deleted via API; delete_tokens={delete_tokens}; deleted_tokens={deleted_tokens}; cancelled_commands={cancelled_commands}",
+    )
+
+    db.commit()
+
+    return {
+        "status": "ok",
+        "deleted_device_id": device_id,
+        "deleted_tokens": deleted_tokens,
+        "cancelled_commands": cancelled_commands,
+    }
