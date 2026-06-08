@@ -2478,3 +2478,4 @@ async def admin_panel_delete_device(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto urządzenie", body))
+
