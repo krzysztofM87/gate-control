@@ -1332,3 +1332,319 @@ async def admin_panel_create_token(
     """
 
     return HTMLResponse(admin_panel_page("Utworzono link", body))
+
+# ===== Client pilot page =====
+
+@app.get("/pilot/{token_value}", response_class=HTMLResponse)
+def client_pilot_page(
+    token_value: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    if token.gate_target == "open_both":
+        buttons = [
+            ("1", "Brama 1", "primary"),
+            ("2", "Brama 2", "secondary"),
+            ("both", "Obie", "danger"),
+        ]
+    elif token.gate_target == "open_2":
+        buttons = [
+            ("2", "Otwórz", "primary"),
+        ]
+    else:
+        buttons = [
+            ("1", "Otwórz", "primary"),
+        ]
+
+    buttons_html = ""
+
+    for gate, label, css_class in buttons:
+        press_url = public_path(f"/pilot/{token_value}/press/{gate}")
+
+        buttons_html += f"""
+        <button class="remote-button {css_class}" data-url="{html.escape(press_url)}">
+            {html.escape(label)}
+        </button>
+        """
+
+    body = f"""
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <title>Pilot do bramy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        :root {{
+            --bg: #111;
+            --panel: #222;
+            --panel2: #2c2c2c;
+            --text: #f4f4f4;
+            --muted: #aaa;
+            --ok: #1d7f3a;
+            --err: #8a1f1f;
+        }}
+
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            background: radial-gradient(circle at top, #333 0, #111 48%, #050505 100%);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }}
+
+        .remote {{
+            width: 100%;
+            max-width: 360px;
+            background: linear-gradient(180deg, #2d2d2d, #171717);
+            border-radius: 36px;
+            padding: 28px 22px 24px;
+            box-shadow:
+                0 24px 60px rgba(0,0,0,.55),
+                inset 0 1px 0 rgba(255,255,255,.12);
+            border: 1px solid rgba(255,255,255,.08);
+        }}
+
+        .remote-header {{
+            text-align: center;
+            margin-bottom: 22px;
+        }}
+
+        .remote-title {{
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: .5px;
+            margin: 0;
+        }}
+
+        .remote-subtitle {{
+            color: var(--muted);
+            font-size: 13px;
+            margin-top: 7px;
+            line-height: 1.35;
+        }}
+
+        .status {{
+            min-height: 46px;
+            background: #101010;
+            border-radius: 16px;
+            padding: 13px 12px;
+            margin-bottom: 20px;
+            text-align: center;
+            color: var(--muted);
+            border: 1px solid rgba(255,255,255,.08);
+            font-size: 14px;
+        }}
+
+        .status.ok {{
+            color: #b7ffc9;
+            border-color: rgba(75, 255, 120, .3);
+        }}
+
+        .status.err {{
+            color: #ffc1c1;
+            border-color: rgba(255, 80, 80, .35);
+        }}
+
+        .buttons {{
+            display: grid;
+            gap: 14px;
+        }}
+
+        .remote-button {{
+            width: 100%;
+            min-height: 78px;
+            border: none;
+            border-radius: 22px;
+            color: white;
+            font-size: 23px;
+            font-weight: 700;
+            letter-spacing: .4px;
+            cursor: pointer;
+            box-shadow:
+                0 9px 0 rgba(0,0,0,.28),
+                inset 0 1px 0 rgba(255,255,255,.18);
+            transition: transform .06s ease, box-shadow .06s ease, opacity .2s ease;
+        }}
+
+        .remote-button:active {{
+            transform: translateY(6px);
+            box-shadow:
+                0 3px 0 rgba(0,0,0,.35),
+                inset 0 1px 0 rgba(255,255,255,.12);
+        }}
+
+        .remote-button:disabled {{
+            opacity: .55;
+            cursor: wait;
+        }}
+
+        .primary {{
+            background: linear-gradient(180deg, #2f7dff, #174aaf);
+        }}
+
+        .secondary {{
+            background: linear-gradient(180deg, #666, #343434);
+        }}
+
+        .danger {{
+            background: linear-gradient(180deg, #a43535, #641818);
+        }}
+
+        .footer {{
+            margin-top: 20px;
+            text-align: center;
+            color: #777;
+            font-size: 11px;
+            word-break: break-all;
+            line-height: 1.35;
+        }}
+
+        .led {{
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #2d2d2d;
+            margin: 0 auto 14px;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
+        }}
+
+        .led.on {{
+            background: #39ff6a;
+            box-shadow: 0 0 14px rgba(57,255,106,.8);
+        }}
+    </style>
+</head>
+<body>
+    <main class="remote">
+        <div id="led" class="led"></div>
+
+        <div class="remote-header">
+            <h1 class="remote-title">Pilot do bramy</h1>
+            <div class="remote-subtitle">
+                Naciśnij przycisk, aby wysłać polecenie do sterownika.
+            </div>
+        </div>
+
+        <div id="status" class="status">
+            Gotowy
+        </div>
+
+        <div class="buttons">
+            {buttons_html}
+        </div>
+
+        <div class="footer">
+            Ważny do: {html.escape(token.valid_to.isoformat())}<br>
+            Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}
+        </div>
+    </main>
+
+    <script>
+        const statusEl = document.getElementById("status");
+        const ledEl = document.getElementById("led");
+        const buttons = Array.from(document.querySelectorAll(".remote-button"));
+
+        function setStatus(text, mode) {{
+            statusEl.textContent = text;
+            statusEl.className = "status" + (mode ? " " + mode : "");
+        }}
+
+        function setBusy(isBusy) {{
+            buttons.forEach(button => button.disabled = isBusy);
+            ledEl.classList.toggle("on", isBusy);
+        }}
+
+        async function pressButton(url, label) {{
+            setBusy(true);
+            setStatus("Wysyłam polecenie: " + label + "...", "");
+
+            try {{
+                const response = await fetch(url, {{
+                    method: "POST",
+                    headers: {{
+                        "X-Requested-With": "fetch"
+                    }}
+                }});
+
+                let data = null;
+                const text = await response.text();
+
+                try {{
+                    data = JSON.parse(text);
+                }} catch (e) {{
+                    data = null;
+                }}
+
+                if (!response.ok) {{
+                    const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+                    setStatus(message, "err");
+                    return;
+                }}
+
+                if (data && data.status === "ok") {{
+                    setStatus("Polecenie wysłane: " + data.command, "ok");
+
+                    if (navigator.vibrate) {{
+                        navigator.vibrate(80);
+                    }}
+
+                    return;
+                }}
+
+                setStatus("Polecenie wysłane", "ok");
+            }} catch (err) {{
+                setStatus("Błąd połączenia z serwerem", "err");
+            }} finally {{
+                setTimeout(() => {{
+                    setBusy(false);
+                }}, 900);
+            }}
+        }}
+
+        buttons.forEach(button => {{
+            button.addEventListener("click", () => {{
+                pressButton(button.dataset.url, button.textContent.trim());
+            }});
+        }});
+    </script>
+</body>
+</html>
+"""
+
+    return HTMLResponse(body)
+
+
+@app.post("/pilot/{token_value}/press/{gate}")
+def client_pilot_press(
+    token_value: str,
+    gate: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    command = create_command_from_token(
+        db,
+        token=token,
+        requested_gate=gate,
+        request=request,
+    )
+
+    return {
+        "status": "ok",
+        "command": command.command,
+        "command_id": command.command_id,
+        "relay_time_ms": command.relay_time_ms,
+    }
