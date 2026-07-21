@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import ADMIN_TOKEN, DEVICE_ID, DEVICE_SECRET, PUBLIC_PATH_PREFIX
 from app.database import get_db
-from app.models import Command, CommandLog
+from app.models import AccessToken, Command, CommandLog
 from app.services import (
     create_command_from_token,
     gate_label,
@@ -446,13 +446,27 @@ def client_pilot_page(
             }}
         }}
 
+        async function readJsonResponse(response) {{
+            const responseText = await response.text();
+
+            try {{
+                return responseText ? JSON.parse(responseText) : {{}};
+            }} catch (error) {{
+                if (!response.ok) {{
+                    throw new Error("Błąd serwera HTTP " + response.status);
+                }}
+
+                throw new Error("Serwer zwrócił nieprawidłową odpowiedź.");
+            }}
+        }}
+
         async function checkCommandStatus(statusUrl) {{
             const response = await fetch(statusUrl, {{
                 method: "GET",
                 headers: {{ "X-Requested-With": "fetch" }}
             }});
 
-            const data = await response.json();
+            const data = await readJsonResponse(response);
 
             if (!response.ok) {{
                 throw new Error(data.detail || "Błąd statusu HTTP " + response.status);
@@ -518,7 +532,7 @@ def client_pilot_page(
                     headers: {{ "X-Requested-With": "fetch" }}
                 }});
 
-                const data = await response.json();
+                const data = await readJsonResponse(response);
                 updateUsage(data);
 
                 if (!response.ok) {{

@@ -2,7 +2,9 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po lokalnej naprawie zwracania utworzonej komendy przez `create_command_from_token()`. Ostatni deploy na VPS: commit `d788070` (`Improve pilot creation form`).
+Ostatnia aktualizacja: 2026-07-21, po naprawie endpointu statusu komendy pilota. Ostatni deploy na VPS: `Fix pilot status endpoint`.
+
+Po podziale `main.py` naprawiono dwa bledy wykonania pilota: brak zwracania komendy z `create_command_from_token()` oraz brak importu `AccessToken` w endpointcie sprawdzajacym status komendy. Frontend pilota obsluguje tez odpowiedzi serwera, ktore nie sa JSON-em, i pokazuje wtedy czytelny blad HTTP.
 
 ## Krotki kontekst
 
@@ -407,9 +409,7 @@ $env:GATE_DEVICE_SECRET = "..."
 - Panel admina i Admin API pokazuja pelne tokeny oraz sekrety urzadzen.
 - Brak automatycznych testow.
 - Brak Alembica; migracje sa proste i reczne w `run_schema_migrations()`.
-- Podzial backendu na moduly jest juz zrobiony lokalnie, ale przed deployem trzeba przejsc runtime test w srodowisku z FastAPI/SQLAlchemy.
 - W odpowiedziach JSON sa drobne powtorzenia klucza `valid_forever`.
-- Formularz usuwania tokenow ma jeden hardcoded path `/gate-control/admin-panel/tokens/delete-all`.
 - Firmware nie obsluguje HTTPS.
 
 ## Ustalenia projektowe
