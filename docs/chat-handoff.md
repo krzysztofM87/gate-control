@@ -1,12 +1,14 @@
 # ChatGPT handoff notes
 
-Ten plik służy do kontynuacji projektu w nowym czacie ChatGPT. Można wkleić poniższy blok do nowej rozmowy albo wskazać plik `docs/chat-handoff.md` i `docs/server-deployment.md`.
+Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-## Krótki kontekst dla nowego czatu
+Ostatnia aktualizacja: 2026-07-21, po lokalnym podziale `server/app/main.py` na moduły. Ostatni deploy na VPS: commit `48c8375` (`Test deploy`).
 
-Kontynuujemy projekt `gate-control`: zdalne sterowanie bramą/szlabanem przez stronę WWW i ESP32.
+## Krotki kontekst
 
-Repozytorium GitHub:
+Kontynuujemy projekt `gate-control`: zdalne sterowanie brama/szlabanem przez strone WWW oraz sterownik ESP32. ESP32 nie jest wystawione do internetu. Urzadzenie odpytuje backend, a klient dostaje link do strony-pilota.
+
+Repozytorium:
 
 ```text
 krzysztofM87/gate-control
@@ -24,13 +26,13 @@ VPS:
 /opt/gate-control
 ```
 
-Alias SSH lokalnie:
+Alias SSH:
 
 ```powershell
 ssh gate-vps
 ```
 
-Użytkownik roboczy na VPS:
+Uzytkownik roboczy na VPS:
 
 ```text
 deploy
@@ -58,108 +60,190 @@ gate-server
 
 ```text
 Klient WWW
-  -> https://tools.malmaz.com/gate-control/brama/{token}
+  -> https://tools.malmaz.com/gate-control/pilot/{token}
   -> Nginx
   -> http://127.0.0.1:8010
   -> Docker container gate-server
-  -> FastAPI
+  -> FastAPI + SQLite
 
 ESP32
-  -> GET  /gate-control/api/device/poll
-  -> POST /gate-control/api/device/ack
+  -> HTTP GET  /gate-control/api/device/poll
+  -> HTTP POST /gate-control/api/device/ack
 ```
 
-Nginx obsługuje prefiks `/gate-control/` i przekazuje ruch do FastAPI. Backend FastAPI ma trasy bez prefiksu, a publiczne linki generuje przez zmienną:
+Nginx obsluguje prefiks `/gate-control/` i przekazuje ruch do FastAPI. Backend ma trasy bez prefiksu, a publiczne linki generuje przez:
 
 ```env
 PUBLIC_PATH_PREFIX=/gate-control
+BASE_URL=https://tools.malmaz.com
 ```
 
-## Aktualne endpointy FastAPI
+Firmware ESP32 w aktualnym stabilnym trybie obsluguje tylko zwykle `http://`, bez TLS. Dlatego Nginx zostawia HTTP dla `/gate-control/api/device/` bez wymuszania przekierowania na HTTPS.
+
+## Aktualny stan aplikacji
+
+Backend nie jest juz prostym MVP z komenda w RAM. Aktualnie uzywa SQLite i SQLAlchemy.
+
+Modele/tabele:
 
 ```text
-GET  /health
+devices
+access_tokens
+commands
+command_logs
+```
+
+Glowny przeplyw:
+
+1. Admin tworzy urzadzenie i token/link.
+2. Klient otwiera `/gate-control/pilot/{token}`.
+3. Samo wejscie w link nie otwiera bramy.
+4. Klikniecie przycisku pilota tworzy komende w SQLite ze statusem `pending`.
+5. ESP32 odpytuje `/api/device/poll`.
+6. Backend zwraca najstarsza komende `pending` dla danego `device_id` i ustawia jej status `sent`.
+7. ESP32 zwiera odpowiednie wyjscie GPIO przez zadany czas.
+8. ESP32 potwierdza `/api/device/ack`.
+9. Backend zapisuje ACK i logi zdarzen.
+
+Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
+
+## Aktualne endpointy
+
+Publiczne / klient:
+
+```text
 GET  /
+GET  /health
 GET  /brama/{token}
 POST /brama/{token}/open
-GET  /api/device/poll
-POST /api/device/ack
-GET  /debug/state
+POST /brama/{token}/open/{gate}
+GET  /pilot/{token}
+POST /pilot/{token}/press/{gate}
+GET  /pilot/{token}/command/{command_id}/status
 ```
 
-Publiczne adresy przez Nginx:
+ESP32:
 
 ```text
-GET  /gate-control/health
-GET  /gate-control/
-GET  /gate-control/brama/{token}
-POST /gate-control/brama/{token}/open
-GET  /gate-control/api/device/poll
-POST /gate-control/api/device/ack
-GET  /gate-control/debug/state
+GET  /api/device/poll
+POST /api/device/ack
 ```
 
-## Aktualny stan MVP
+Admin API:
 
-Backend działa i odpowiada na:
-
-```bash
-curl https://tools.malmaz.com/gate-control/health
+```text
+POST /admin/devices
+GET  /admin/devices
+POST /admin/tokens
+GET  /admin/tokens
+GET  /admin/commands
+POST /admin/tokens/delete-all
 ```
 
-Oczekiwana odpowiedź zawiera m.in.:
+Panel admina HTML:
 
-```json
-{
-  "status": "ok",
-  "service": "gate-control",
-  "public_path_prefix": "/gate-control"
-}
+```text
+GET  /admin-panel
+POST /admin-panel/login
+POST /admin-panel/logout
+POST /admin-panel/tokens
+POST /admin-panel/tokens/delete-all
+GET  /admin-panel/devices
+POST /admin-panel/devices
+GET  /admin-panel/devices/{device_id}/edit
+POST /admin-panel/devices/{device_id}/update
+POST /admin-panel/devices/{device_id}/toggle
+GET  /admin-panel/devices/{device_id}/delete
+POST /admin-panel/devices/{device_id}/delete
 ```
 
-MVP przechowuje komendę `open` w pamięci procesu. To znaczy:
+Tymczasowe / techniczne:
 
-- kliknięcie przycisku zapisuje komendę w RAM,
-- ESP32 odpytuje `/api/device/poll`,
-- po `/api/device/ack` komenda jest czyszczona,
-- restart kontenera kasuje stan.
+```text
+GET /debug/state
+```
 
-To jest celowe tylko na etap testów. Następny etap to SQLite.
+`/debug/state` nadal jest publiczne i docelowo trzeba je usunac albo zabezpieczyc.
 
-## Ważne pliki
+## Wazne pliki
 
 ```text
 server/app/main.py
+server/app/config.py
+server/app/schemas.py
+server/app/services.py
+server/app/views.py
+server/app/models.py
+server/app/database.py
+server/app/routes/public.py
+server/app/routes/device.py
+server/app/routes/admin.py
+server/app/routes/admin_panel.py
 server/Dockerfile
 server/docker-compose.yml
 server/requirements.txt
+firmware/esp32_gate/esp32_gate.ino
+firmware/esp32_gate/src/api_client.cpp
+firmware/esp32_gate/src/gate_control.cpp
+firmware/esp32_gate/include/config.h
 deploy.ps1
 deploy/nginx/gate-control.conf
 deploy/apply-nginx.sh
+scripts/gate-admin.ps1
 docs/server-deployment.md
 docs/chat-handoff.md
 ```
 
-## Deploy z VS Code / Windows
+Aktualny podzial backendu:
 
-Standardowy deploy:
+```text
+server/app/main.py              - tworzy FastAPI app, startup i include_router
+server/app/config.py            - zmienne srodowiskowe i stale konfiguracyjne
+server/app/schemas.py           - modele Pydantic dla requestow
+server/app/services.py          - logika wspolna: auth, tokeny, komendy, migracje
+server/app/views.py             - helpery HTML/panelu/pilota
+server/app/routes/public.py     - health, index, stary /brama, nowy /pilot, debug/state
+server/app/routes/device.py     - poll/ack dla ESP32
+server/app/routes/admin.py      - Admin API JSON
+server/app/routes/admin_panel.py - panel admina HTML
+```
+
+## Deploy
+
+Standardowy deploy robimy z Windows przez:
 
 ```powershell
 cd C:\dev\gate-control
-.\deploy.ps1
+.\deploy.ps1 "Nazwa commita"
 ```
 
-Skrypt robi:
+Skrypt `deploy.ps1` robi:
 
 1. `git status`
 2. `git add .`
-3. `git commit`
+3. `git commit -m "..."`
 4. `git push`
-5. SSH na VPS
-6. `git pull`
-7. `docker compose up -d --build` w `/opt/gate-control/server`
+5. `scp` tymczasowego skryptu Bash na `gate-vps`
+6. SSH na VPS
+7. `cd /opt/gate-control/server`
+8. `git pull`
+9. `docker compose up -d --build`
 
-Użytkownik chce, aby zawsze proponować nazwę commita.
+Wazne:
+
+- Zawsze przed deployem sprawdzic `git status`.
+- Zawsze zaproponowac czytelna nazwe commita.
+- `git add .` lapie wszystko, wiec nie zostawiac przypadkowych plikow w repo.
+- Skrypt nie aplikuje Nginx i nie wykonuje automatycznego healthchecka po deployu.
+
+Ostatni testowy deploy:
+
+```text
+Commit: 48c8375 Test deploy
+Data: 2026-07-21
+Wynik: kontener gate-server przebudowany i uruchomiony
+Healthcheck: https://tools.malmaz.com/gate-control/health -> status ok
+```
 
 ## Nginx
 
@@ -176,15 +260,15 @@ cd /opt/gate-control
 bash deploy/apply-nginx.sh
 ```
 
-Nginx ma wystawiać aplikację wyłącznie pod:
+Nginx ma wystawiac aplikacje pod:
 
 ```text
 /gate-control/
 ```
 
-Nie przejmować całego `tools.malmaz.com`, bo domena będzie służyć też do innych narzędzi.
+Nie przejmowac calego `tools.malmaz.com`, bo domena moze sluzyc tez do innych narzedzi.
 
-## Plik `.env`
+## Plik .env
 
 Prawdziwy `.env` jest tylko na VPS:
 
@@ -192,9 +276,9 @@ Prawdziwy `.env` jest tylko na VPS:
 /opt/gate-control/server/.env
 ```
 
-Nie commitować `.env`.
+Nie commitowac `.env`.
 
-Wymagane / używane pola:
+Uzywane pola:
 
 ```env
 APP_ENV=production
@@ -204,19 +288,67 @@ PUBLIC_PATH_PREFIX=/gate-control
 DATABASE_URL=sqlite:///./data/gate-control.sqlite3
 DEVICE_ID=gate-main
 DEVICE_TOKEN=sekret_tylko_na_vps
+DEVICE_SECRET=opcjonalnie_alias_dla_DEVICE_TOKEN
+ADMIN_TOKEN=sekret_admina_tylko_na_vps
 COMMAND_RELAY_TIME_MS=700
 TOKEN_DEFAULT_VALID_HOURS=72
 OPEN_COOLDOWN_SECONDS=5
+APP_TIMEZONE=Europe/Warsaw
 LOG_LEVEL=info
 ```
 
-Token generować na VPS:
+Token/sekret generowac na VPS, np.:
 
 ```bash
 openssl rand -hex 32
 ```
 
-## Przydatne komendy na VPS
+## Firmware ESP32
+
+Firmware jest w:
+
+```text
+firmware/esp32_gate
+```
+
+Piny:
+
+```text
+GPIO2  - dioda debug
+GPIO26 - wyjscie brama/przycisk 1
+GPIO27 - wyjscie brama/przycisk 2
+GPIO0  - BOOT, wejscie do konfiguracji
+```
+
+Konfiguracja urzadzenia:
+
+- portal AP `GateConfig-*`,
+- terminal przez Serial,
+- dane zapisane w Preferences/NVS,
+- wymagane pola: WiFi SSID, WiFi password, server URL, device id, device secret.
+
+Przyklad konfiguracji przez terminal:
+
+```text
+wifi NAZWA_WIFI|HASLO_WIFI
+server http://tools.malmaz.com/gate-control
+device gate-main|SEKRET_URZADZENIA
+save
+reboot
+```
+
+Firmware aktualnie korzysta z HTTP i naglowkow:
+
+```text
+X-Device-Id
+X-Device-Secret
+```
+
+Aktualna lokalna konfiguracja po testowym deployu ma `LOG_LEVEL` ustawiony na `LOG_LEVEL_INFO`.
+
+## Przydatne komendy
+
+Na VPS:
 
 ```bash
 cd /opt/gate-control/server
@@ -246,58 +378,55 @@ Test publiczny:
 curl -L https://tools.malmaz.com/gate-control/health
 ```
 
-## Typowe błędy już rozwiązane
+Pomocniczy skrypt admina z Windows:
 
-1. `Attribute "app" not found in module "app.main"`  
-   Przyczyna: `server/app/main.py` był pusty. Rozwiązanie: dodać `app = FastAPI(...)`.
+```powershell
+.\scripts\gate-admin.ps1 -Action debug
+.\scripts\gate-admin.ps1 -Action new-token -GateTarget open_1 -Label "test"
+.\scripts\gate-admin.ps1 -Action poll
+```
 
-2. `no configuration file provided: not found`  
-   Przyczyna: `docker compose` był uruchamiany w złym katalogu albo brakowało `server/docker-compose.yml`.
+Sekrety dla `gate-admin.ps1` przekazywac przez zmienne srodowiskowe:
 
-3. `curl: Failed to connect to 127.0.0.1 port 8010`  
-   Przyczyna: kontener nie działał albo restartował się przez błąd aplikacji.
+```powershell
+$env:GATE_ADMIN_TOKEN = "..."
+$env:GATE_DEVICE_SECRET = "..."
+```
 
-4. Problemy PowerShell/SSH z `\r` i `unexpected end of file`  
-   Rozwiązanie: `deploy.ps1` tworzy tymczasowy skrypt `.deploy-remote.sh`, wysyła go przez `scp` i uruchamia na VPS.
+## Znane ryzyka / dlug techniczny
 
-5. `gate-vps` nie działał  
-   Przyczyna: plik `C:\Users\CP24\.ssh\config` był błędnie zapisany jako `config.txt`. Poprawiono na `config`.
+- `/debug/state` jest publiczne.
+- Panel admina i Admin API pokazuja pelne tokeny oraz sekrety urzadzen.
+- Brak automatycznych testow.
+- Brak Alembica; migracje sa proste i reczne w `run_schema_migrations()`.
+- Podzial backendu na moduly jest juz zrobiony lokalnie, ale przed deployem trzeba przejsc runtime test w srodowisku z FastAPI/SQLAlchemy.
+- W odpowiedziach JSON sa drobne powtorzenia klucza `valid_forever`.
+- Formularz usuwania tokenow ma jeden hardcoded path `/gate-control/admin-panel/tokens/delete-all`.
+- Firmware nie obsluguje HTTPS.
 
 ## Ustalenia projektowe
 
-- ESP32 nie ma być wystawiane do internetu.
-- ESP32 odpytuje serwer, czyli model polling.
-- Klient dostaje link do strony z przyciskiem.
-- Samo wejście w link nie otwiera bramy.
-- Dopiero kliknięcie przycisku wysyła komendę.
-- Token w URL ma być docelowo losowy i czasowy, nie oparty na samym numerze rezerwacji.
-- Docelowo system ma mieć logi użycia.
-- Sterownik ESP32 ma zwierać styki przycisku pilota przez przekaźnik/tranzystor na ok. 0,5-1 s.
-- Pilot ma dwa przyciski / dwie bramy lub szlabany, więc docelowo trzeba obsłużyć więcej niż jeden kanał.
+- ESP32 nie ma byc wystawiane do internetu.
+- Model komunikacji to polling z ESP32 do serwera.
+- Samo wejscie w link nie otwiera bramy.
+- Dopiero klikniecie przycisku wysyla komende.
+- Token w URL ma byc losowy i czasowy albo bezterminowy, zaleznie od ustawien.
+- System ma zapisywac logi uzycia.
+- Sterownik ESP32 zwiera styki pilota przez przekaznik/transoptor/tranzystor na ok. 0,5-1 s.
+- Pilot ma obslugiwac dwa kanaly oraz opcje obu kanalow.
+- Do deployu uzywamy `deploy.ps1`.
+- Ten plik `docs/chat-handoff.md` ma byc utrzymywany na biezaco.
 
-## Następny etap techniczny
+## Najblizsze sensowne kroki
 
-Najbliższe zadanie:
+1. Zabezpieczyc albo usunac `/debug/state`.
+2. Dodac healthcheck po `deploy.ps1`.
+3. Dodac minimalne testy backendu dla token -> command -> poll -> ack.
+4. Ograniczyc ekspozycje sekretow w panelu/admin API.
+5. Docelowo dodac HTTPS w firmware albo inny bezpieczny wariant komunikacji urzadzenia.
 
-1. Wprowadzić SQLite.
-2. Dodać modele/tabele:
-   - devices,
-   - access_tokens,
-   - commands,
-   - command_logs / access_logs.
-3. Token klienta ma mieć:
-   - losową wartość,
-   - datę ważności od/do,
-   - status aktywny/użyty/wygasły,
-   - opcjonalnie limit użyć,
-   - przypisanie do bramy/kanału.
-4. Komenda `open` ma być zapisywana w bazie.
-5. ESP32 przez `/api/device/poll` ma pobierać najstarszą oczekującą komendę dla swojego `DEVICE_ID`.
-6. ESP32 przez `/api/device/ack` ma potwierdzać wykonanie.
-7. Backend ma zapisywać logi: czas, IP, token, device, command_id, status.
-
-## Proponowany prompt do nowego czatu
+## Prompt do nowego czatu
 
 ```text
-Kontynuujemy projekt gate-control z repo krzysztofM87/gate-control. Przeczytaj docs/chat-handoff.md i docs/server-deployment.md. Aktualnie działa FastAPI w Dockerze na VPS pod 127.0.0.1:8010, Nginx wystawia aplikację pod https://tools.malmaz.com/gate-control/. Deploy robię z Windows/VS Code przez .\deploy.ps1 i ssh gate-vps. MVP trzyma komendę open w RAM. Następny etap: SQLite dla tokenów, komend i logów, bez wrzucania sekretów do repo. Zawsze proponuj nazwę commita.
+Kontynuujemy projekt gate-control z repo krzysztofM87/gate-control. Przeczytaj docs/chat-handoff.md i docs/server-deployment.md. Aplikacja FastAPI dziala w Dockerze na VPS pod 127.0.0.1:8010, Nginx wystawia ja pod https://tools.malmaz.com/gate-control/. Backend uzywa SQLite/SQLAlchemy dla devices, access_tokens, commands i command_logs. Lokalnie main.py zostal podzielony na config/schemas/services/views/routes. Klient uzywa strony /pilot/{token}; ESP32 polluje /api/device/poll i potwierdza /api/device/ack. Deploy robimy z Windows przez .\deploy.ps1 i ssh gate-vps. Ostatni testowy deploy: commit 48c8375 Test deploy, healthcheck status ok. Zawsze sprawdzaj git status, proponuj nazwe commita i dbaj, zeby docs/chat-handoff.md byl aktualny.
 ```

@@ -1,0 +1,630 @@
+import html
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+
+from app.config import ADMIN_TOKEN, DEVICE_ID, DEVICE_SECRET, PUBLIC_PATH_PREFIX
+from app.database import get_db
+from app.models import Command, CommandLog
+from app.services import (
+    create_command_from_token,
+    gate_label,
+    now_iso,
+    public_path,
+    validate_access_token,
+)
+from app.views import (
+    display_button_label,
+    display_pilot_title,
+    render_page,
+    token_valid_to_text,
+)
+
+
+router = APIRouter()
+
+@router.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "gate-control",
+        "public_path_prefix": PUBLIC_PATH_PREFIX,
+        "database": "sqlite",
+        "device_id": DEVICE_ID,
+        "device_secret_configured": bool(DEVICE_SECRET),
+        "admin_token_configured": bool(ADMIN_TOKEN),
+        "time": now_iso(),
+    }
+
+
+@router.get("/")
+def index():
+    return {
+        "status": "ok",
+        "message": "Gate Control server is running",
+        "public_url": public_path("/"),
+        "health_url": public_path("/health"),
+        "create_token_endpoint": public_path("/admin/tokens"),
+    }
+
+
+@router.get("/brama/{token_value}", response_class=HTMLResponse)
+def gate_page(
+    token_value: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    buttons = ""
+
+    if token.gate_target == "open_both":
+        options = [
+            ("1", "Otwórz bramę 1", ""),
+            ("2", "Otwórz bramę 2", "secondary"),
+            ("both", "Otwórz obie", "danger"),
+        ]
+    else:
+        options = [
+            ("", gate_label(token.gate_target), ""),
+        ]
+
+    for gate, label, css_class in options:
+        if gate:
+            action = public_path(f"/brama/{token_value}/open/{gate}")
+        else:
+            action = public_path(f"/brama/{token_value}/open")
+
+        class_attr = f' class="{css_class}"' if css_class else ""
+
+        buttons += f"""
+        <form method="post" action="{html.escape(action)}">
+            <button{class_attr} type="submit">{html.escape(label)}</button>
+        </form>
+        """
+
+    body = f"""
+        <h1>Otwieranie bramy</h1>
+        <p>Naciśnij przycisk, aby wysłać polecenie otwarcia.</p>
+        {buttons}
+        <div class="small">
+            Ważny do: {html.escape(token_valid_to_text(token))}<br>
+            Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}
+        </div>
+    """
+
+    return render_page("Otwieranie bramy", body)
+
+
+@router.post("/brama/{token_value}/open", response_class=HTMLResponse)
+def open_gate_default(
+    token_value: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    return open_gate(token_value, None, request, db)
+
+
+@router.post("/brama/{token_value}/open/{gate}", response_class=HTMLResponse)
+def open_gate_route(
+    token_value: str,
+    gate: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    return open_gate(token_value, gate, request, db)
+
+
+def open_gate(
+    token_value: str,
+    gate: Optional[str],
+    request: Request,
+    db: Session,
+):
+    token = validate_access_token(db, token_value, request)
+    command = create_command_from_token(
+        db,
+        token=token,
+        requested_gate=gate,
+        request=request,
+    )
+
+    back_url = public_path(f"/brama/{token_value}")
+
+    body = f"""
+        <h1>Polecenie wysłane</h1>
+        <p>Komenda <strong>{html.escape(command.command)}</strong> została zapisana. ESP32 odbierze ją przy następnym odpytywaniu serwera.</p>
+        <a href="{html.escape(back_url)}">Wróć do przycisku</a>
+        <div class="small">
+            Command ID: {html.escape(command.command_id)}
+        </div>
+    """
+
+    return render_page("Polecenie wysłane", body)
+
+
+@router.get("/debug/state")
+def debug_state(db: Session = Depends(get_db)):
+    pending_count = db.query(Command).filter(Command.status == "pending").count()
+    sent_count = db.query(Command).filter(Command.status == "sent").count()
+    done_count = db.query(Command).filter(Command.status == "done").count()
+
+    last_command = (
+        db.query(Command)
+        .order_by(Command.created_at.desc())
+        .first()
+    )
+
+    last_log = (
+        db.query(CommandLog)
+        .order_by(CommandLog.created_at.desc())
+        .first()
+    )
+
+    return {
+        "database": "sqlite",
+        "public_path_prefix": PUBLIC_PATH_PREFIX,
+        "device_id": DEVICE_ID,
+        "device_secret_configured": bool(DEVICE_SECRET),
+        "admin_token_configured": bool(ADMIN_TOKEN),
+        "counts": {
+            "pending": pending_count,
+            "sent": sent_count,
+            "done": done_count,
+        },
+        "last_command": {
+            "command_id": last_command.command_id,
+            "device_id": last_command.device_id,
+            "command": last_command.command,
+            "status": last_command.status,
+            "created_at": last_command.created_at.isoformat(),
+        } if last_command else None,
+        "last_log": {
+            "event_type": last_log.event_type,
+            "status": last_log.status,
+            "message": last_log.message,
+            "created_at": last_log.created_at.isoformat(),
+        } if last_log else None,
+    }
+
+@router.get("/pilot/{token_value}", response_class=HTMLResponse)
+def client_pilot_page(
+    token_value: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    if token.gate_target == "open_both":
+        buttons = [
+            ("1", display_button_label(token, "open_1"), "primary"),
+            ("2", display_button_label(token, "open_2"), "secondary"),
+            ("both", display_button_label(token, "open_both"), "danger"),
+        ]
+    elif token.gate_target == "open_2":
+        buttons = [
+            ("2", display_button_label(token, "open_2"), "primary"),
+        ]
+    else:
+        buttons = [
+            ("1", display_button_label(token, "open_1"), "primary"),
+        ]
+
+    buttons_html = ""
+
+    for gate, label, css_class in buttons:
+        press_url = public_path(f"/pilot/{token_value}/press/{gate}")
+
+        buttons_html += f"""
+        <button class="remote-button {css_class}" data-url="{html.escape(press_url)}">
+            {html.escape(label)}
+        </button>
+        """
+
+    max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
+    title = display_pilot_title(token)
+
+    body = f"""
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <title>{html.escape(title)}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            background: radial-gradient(circle at top, #333 0, #111 48%, #050505 100%);
+            color: #f4f4f4;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }}
+        .remote {{
+            width: 100%;
+            max-width: 360px;
+            background: linear-gradient(180deg, #2d2d2d, #171717);
+            border-radius: 36px;
+            padding: 28px 22px 24px;
+            box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.12);
+            border: 1px solid rgba(255,255,255,.08);
+        }}
+        .remote-header {{ text-align: center; margin-bottom: 22px; }}
+        .remote-title {{ font-size: 24px; font-weight: 700; letter-spacing: .5px; margin: 0; }}
+        .remote-subtitle {{ color: #aaa; font-size: 13px; margin-top: 7px; line-height: 1.35; }}
+        .status {{
+            min-height: 58px;
+            background: #101010;
+            border-radius: 16px;
+            padding: 13px 12px;
+            margin-bottom: 14px;
+            text-align: center;
+            color: #aaa;
+            border: 1px solid rgba(255,255,255,.08);
+            font-size: 14px;
+            line-height: 1.35;
+        }}
+        .status.ok {{ color: #b7ffc9; border-color: rgba(75, 255, 120, .3); }}
+        .status.wait {{ color: #ffe9a6; border-color: rgba(255, 220, 80, .35); }}
+        .status.err {{ color: #ffc1c1; border-color: rgba(255, 80, 80, .35); }}
+        .steps {{ display: grid; gap: 6px; margin-bottom: 18px; font-size: 13px; color: #777; }}
+        .step {{ background: rgba(255,255,255,.04); border-radius: 10px; padding: 8px 10px; }}
+        .step.active {{ color: #ffe9a6; }}
+        .step.done {{ color: #b7ffc9; }}
+        .buttons {{ display: grid; gap: 14px; }}
+        .remote-button {{
+            width: 100%;
+            min-height: 78px;
+            border: none;
+            border-radius: 22px;
+            color: white;
+            font-size: 23px;
+            font-weight: 700;
+            letter-spacing: .4px;
+            cursor: pointer;
+            box-shadow: 0 9px 0 rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.18);
+            transition: transform .06s ease, box-shadow .06s ease, opacity .2s ease;
+        }}
+        .remote-button:active {{
+            transform: translateY(6px);
+            box-shadow: 0 3px 0 rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.12);
+        }}
+        .remote-button:disabled {{ opacity: .55; cursor: wait; }}
+        .primary {{ background: linear-gradient(180deg, #2f7dff, #174aaf); }}
+        .secondary {{ background: linear-gradient(180deg, #666, #343434); }}
+        .danger {{ background: linear-gradient(180deg, #a43535, #641818); }}
+        .footer {{
+            margin-top: 20px;
+            text-align: center;
+            color: #777;
+            font-size: 11px;
+            word-break: break-all;
+            line-height: 1.35;
+        }}
+        .led {{
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #2d2d2d;
+            margin: 0 auto 14px;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
+        }}
+        .led.on {{ background: #39ff6a; box-shadow: 0 0 14px rgba(57,255,106,.8); }}
+            .admin-nav {{
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #222;
+            border-radius: 12px;
+            padding: 10px 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 18px rgba(0,0,0,.12);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }}
+
+        .admin-nav a {{
+            display: inline-block;
+            color: white;
+            text-decoration: none;
+            padding: 9px 12px;
+            border-radius: 8px;
+            background: #333;
+            font-size: 14px;
+        }}
+
+        .admin-nav a:hover {{
+            background: #444;
+        }}
+
+        .admin-nav .brand {{
+            font-weight: bold;
+            background: #111;
+        }}
+
+        @media (max-width: 700px) {{
+            .admin-nav {{
+                position: static;
+            }}
+
+            .admin-nav a {{
+                width: 100%;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <main class="remote">
+        <div id="led" class="led"></div>
+
+        <div class="remote-header">
+            <h1 class="remote-title">{html.escape(title)}</h1>
+            <div class="remote-subtitle">Naciśnij przycisk, aby wysłać polecenie do sterownika.</div>
+        </div>
+
+        <div id="status" class="status">Gotowy</div>
+
+        <div class="steps">
+            <div id="step-created" class="step">1. Komenda zapisana na serwerze</div>
+            <div id="step-sent" class="step">2. Sterownik odebrał komendę</div>
+            <div id="step-done" class="step">3. Sterownik potwierdził wykonanie</div>
+        </div>
+
+        <div class="buttons">
+            {buttons_html}
+        </div>
+
+        <div class="footer">
+            Ważny do: {html.escape(token_valid_to_text(token))}<br>
+            Użycia: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span>
+        </div>
+    </main>
+
+    <script>
+        const statusEl = document.getElementById("status");
+        const ledEl = document.getElementById("led");
+        const buttons = Array.from(document.querySelectorAll(".remote-button"));
+        const stepCreated = document.getElementById("step-created");
+        const stepSent = document.getElementById("step-sent");
+        const stepDone = document.getElementById("step-done");
+        const usageCountEl = document.getElementById("usage-count");
+        const usageMaxEl = document.getElementById("usage-max");
+
+        let readyTimer = null;
+
+        function setStatus(text, mode) {{
+            statusEl.textContent = text;
+            statusEl.className = "status" + (mode ? " " + mode : "");
+        }}
+
+        function clearReadyTimer() {{
+            if (readyTimer) {{
+                clearTimeout(readyTimer);
+                readyTimer = null;
+            }}
+        }}
+
+        function resetSteps() {{
+            [stepCreated, stepSent, stepDone].forEach(step => step.className = "step");
+        }}
+
+        function scheduleReady() {{
+            clearReadyTimer();
+            readyTimer = setTimeout(() => {{
+                resetSteps();
+                setStatus("Gotowy", "");
+            }}, 2500);
+        }}
+
+        function setStep(step, state) {{
+            step.className = "step " + state;
+        }}
+
+        function setBusy(isBusy) {{
+            buttons.forEach(button => button.disabled = isBusy);
+            ledEl.classList.toggle("on", isBusy);
+        }}
+
+        function updateUsage(data) {{
+            if (!data) return;
+
+            if (typeof data.used_count !== "undefined" && data.used_count !== null) {{
+                usageCountEl.textContent = data.used_count;
+            }}
+
+            if (typeof data.max_uses !== "undefined") {{
+                usageMaxEl.textContent = data.max_uses === null ? "bez limitu" : data.max_uses;
+            }}
+        }}
+
+        async function checkCommandStatus(statusUrl) {{
+            const response = await fetch(statusUrl, {{
+                method: "GET",
+                headers: {{ "X-Requested-With": "fetch" }}
+            }});
+
+            const data = await response.json();
+
+            if (!response.ok) {{
+                throw new Error(data.detail || "Błąd statusu HTTP " + response.status);
+            }}
+
+            return data;
+        }}
+
+        async function watchCommandStatus(statusUrl) {{
+            const maxAttempts = 20;
+
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {{
+                const data = await checkCommandStatus(statusUrl);
+                updateUsage(data);
+
+                if (data.status === "pending") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "active");
+                    setStatus("Komenda zapisana. Czekam aż sterownik ją odbierze...", "wait");
+                }}
+
+                if (data.status === "sent") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "active");
+                    setStatus("Sterownik odebrał komendę. Czekam na potwierdzenie...", "wait");
+                }}
+
+                if (data.status === "done") {{
+                    setStep(stepCreated, "done");
+                    setStep(stepSent, "done");
+                    setStep(stepDone, "done");
+                    setStatus("Wykonano. Sterownik potwierdził komendę.", "ok");
+
+                    if (navigator.vibrate) {{
+                        navigator.vibrate([60, 40, 60]);
+                    }}
+
+                    scheduleReady();
+                    return;
+                }}
+
+                if (data.status !== "pending" && data.status !== "sent" && data.status !== "done") {{
+                    setStatus("Status komendy: " + data.status, "err");
+                    return;
+                }}
+
+                await new Promise(resolve => setTimeout(resolve, 700));
+            }}
+
+            setStatus("Komenda wysłana, ale brak potwierdzenia w oczekiwanym czasie.", "err");
+        }}
+
+        async function pressButton(url, label) {{
+            clearReadyTimer();
+            resetSteps();
+            setBusy(true);
+            setStatus("Wysyłam polecenie: " + label + "...", "wait");
+
+            try {{
+                const response = await fetch(url, {{
+                    method: "POST",
+                    headers: {{ "X-Requested-With": "fetch" }}
+                }});
+
+                const data = await response.json();
+                updateUsage(data);
+
+                if (!response.ok) {{
+                    const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+                    setStatus(message, "err");
+                    return;
+                }}
+
+                if (data && data.status === "ok") {{
+                    setStep(stepCreated, "done");
+                    setStatus("Komenda zapisana na serwerze.", "wait");
+
+                    if (data.status_url) {{
+                        await watchCommandStatus(data.status_url);
+                    }} else {{
+                        setStatus("Polecenie wysłane: " + data.command, "ok");
+                        scheduleReady();
+                    }}
+
+                    return;
+                }}
+
+                setStatus("Polecenie wysłane", "ok");
+                scheduleReady();
+            }} catch (err) {{
+                setStatus("Błąd: " + err.message, "err");
+            }} finally {{
+                setTimeout(() => setBusy(false), 700);
+            }}
+        }}
+
+        buttons.forEach(button => {{
+            button.addEventListener("click", () => {{
+                pressButton(button.dataset.url, button.textContent.trim());
+            }});
+        }});
+    </script>
+</body>
+</html>
+"""
+
+    return HTMLResponse(body)
+
+
+@router.post("/pilot/{token_value}/press/{gate}")
+def client_pilot_press(
+    token_value: str,
+    gate: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+
+    command = create_command_from_token(
+        db,
+        token=token,
+        requested_gate=gate,
+        request=request,
+    )
+
+    db.refresh(token)
+
+    return {
+        "status": "ok",
+        "command": command.command,
+        "command_id": command.command_id,
+        "relay_time_ms": command.relay_time_ms,
+        "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
+        "token_status": token.status,
+    }
+
+
+@router.get("/pilot/{token_value}/command/{command_id}/status")
+def client_pilot_command_status(
+    token_value: str,
+    command_id: str,
+    db: Session = Depends(get_db),
+):
+    token = db.query(AccessToken).filter(AccessToken.token_value == token_value).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    command = (
+        db.query(Command)
+        .filter(Command.command_id == command_id)
+        .filter(Command.token_id == token.id)
+        .first()
+    )
+
+    if command is None:
+        raise HTTPException(status_code=404, detail="Command not found")
+
+    return {
+        "command_id": command.command_id,
+        "command": command.command,
+        "status": command.status,
+        "delivered_count": command.delivered_count,
+        "created_at": command.created_at.isoformat() if command.created_at else None,
+        "sent_at": command.sent_at.isoformat() if command.sent_at else None,
+        "ack_at": command.ack_at.isoformat() if command.ack_at else None,
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "valid_forever": getattr(token, "valid_forever", False),
+        "token_status": token.status,
+    }
