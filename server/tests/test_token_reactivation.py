@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
 from app.database import Base
-from app.models import AccessToken, Command, CommandLog, TokenClientUsage
+from app.models import AccessToken, Command, CommandLog, TokenClientUsage, VirtualPilotButton
 from app.routes.public import client_pilot_page
 from app.services import now_utc, reactivate_access_token, validate_access_token
 
@@ -54,6 +54,13 @@ class TokenReactivationTest(unittest.TestCase):
                     token_id=token.id,
                     client_key="a" * 64,
                     used_count=1,
+                ),
+                VirtualPilotButton(
+                    token_id=token.id,
+                    label="Brama A",
+                    device_id="device-a",
+                    command="open_1",
+                    sort_order=0,
                 ),
                 TokenClientUsage(
                     token_id=token.id,
@@ -105,6 +112,7 @@ class TokenReactivationTest(unittest.TestCase):
         self.assertEqual(token.valid_to - token.valid_from, original_duration)
         self.assertGreater(token.valid_to, current_time)
         self.assertEqual(self.db.query(TokenClientUsage).count(), 0)
+        self.assertEqual(self.db.query(VirtualPilotButton).count(), 1)
         self.assertEqual(commands["pending-command"], "cancelled")
         self.assertEqual(commands["sent-command"], "cancelled")
         self.assertEqual(commands["done-command"], "done")

@@ -18,6 +18,7 @@ class CreateTokenRequest(BaseModel):
     button_1_label: Optional[str] = None
     button_2_label: Optional[str] = None
     button_both_label: Optional[str] = None
+    is_virtual: bool = False
 
     device_id: Optional[str] = None
     gate_target: str = "open_1"
@@ -58,3 +59,17 @@ class CreateDeviceRequest(BaseModel):
     name: Optional[str] = None
     secret: Optional[str] = None
     is_active: bool = True
+
+
+class VirtualPilotButtonRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    device_id: str = Field(min_length=1, max_length=120)
+    command: str
+    sort_order: int = Field(default=0, ge=0, le=1000)
+
+
+class UpdateVirtualPilotButtonRequest(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    device_id: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    command: Optional[str] = None
+    sort_order: Optional[int] = Field(default=None, ge=0, le=1000)

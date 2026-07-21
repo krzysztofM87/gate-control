@@ -37,6 +37,8 @@ class AccessToken(Base):
     button_2_label = Column(String(120), nullable=True)
     button_both_label = Column(String(120), nullable=True)
 
+    is_virtual = Column(Boolean, default=False, nullable=False)
+
     device_id = Column(String(120), index=True, nullable=False)
 
     gate_target = Column(String(40), default="open_1", nullable=False)
@@ -55,6 +57,18 @@ class AccessToken(Base):
 
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class VirtualPilotButton(Base):
+    __tablename__ = "virtual_pilot_buttons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_id = Column(Integer, index=True, nullable=False)
+    label = Column(String(120), nullable=False)
+    device_id = Column(String(120), index=True, nullable=False)
+    command = Column(String(40), nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
 
 
 class TokenClientUsage(Base):

@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import AccessToken, Command, CommandLog, TokenClientUsage
+from app.models import AccessToken, Command, CommandLog, TokenClientUsage, VirtualPilotButton
 from app.services import delete_access_token, now_utc
 
 
@@ -47,6 +47,15 @@ class TokenDeletionTest(unittest.TestCase):
                 token_id=token.id,
                 client_key="a" * 64,
                 used_count=2,
+            )
+        )
+        self.db.add(
+            VirtualPilotButton(
+                token_id=token.id,
+                label="Brama testowa",
+                device_id="test-device",
+                command="open_1",
+                sort_order=0,
             )
         )
         self.db.add_all(
@@ -91,12 +100,19 @@ class TokenDeletionTest(unittest.TestCase):
 
         self.assertEqual(result["cancelled_commands"], 2)
         self.assertEqual(result["deleted_client_usages"], 1)
+        self.assertEqual(result["deleted_virtual_buttons"], 1)
         self.assertIsNone(
             self.db.query(AccessToken).filter(AccessToken.id == token_id).first()
         )
         self.assertEqual(
             self.db.query(TokenClientUsage)
             .filter(TokenClientUsage.token_id == token_id)
+            .count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(VirtualPilotButton)
+            .filter(VirtualPilotButton.token_id == token_id)
             .count(),
             0,
         )

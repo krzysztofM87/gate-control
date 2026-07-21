@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.config import (
@@ -14,10 +14,12 @@ from app.config import (
     TOKEN_DEFAULT_VALID_HOURS,
 )
 from app.database import get_db
-from app.models import AccessToken, Command, Device, TokenClientUsage
+from app.models import AccessToken, Command, Device, TokenClientUsage, VirtualPilotButton
 from app.services import (
     check_admin_auth,
+    create_virtual_pilot_button,
     delete_access_token,
+    delete_virtual_pilot_button,
     device_counts,
     device_or_404,
     expire_pending_commands,
@@ -29,6 +31,9 @@ from app.services import (
     public_url,
     reactivate_access_token,
     update_access_token,
+    update_virtual_pilot_button,
+    virtual_button_or_404,
+    virtual_buttons_for_token,
 )
 from app.views import (
     admin_login_page,
@@ -94,6 +99,46 @@ def parse_optional_hours(value: str) -> int | None:
 
     return parsed
 
+
+def parse_sort_order(value: str) -> int:
+    try:
+        parsed = int(value or 0)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid button order") from error
+
+    return max(0, min(parsed, 1000))
+
+
+def mapping_device_options(devices: list[Device], selected_device_id: str = "") -> str:
+    options = ""
+
+    for device in devices:
+        selected = " selected" if device.device_id == selected_device_id else ""
+        disabled = " disabled" if not device.is_active and not selected else ""
+        status_text = "" if device.is_active else " (wyłączone)"
+        name_text = f"{device.name} - " if device.name else ""
+        label = f"{name_text}{device.device_id}{status_text}"
+        options += (
+            f'<option value="{html.escape(device.device_id)}"{selected}{disabled}>'
+            f"{html.escape(label)}</option>"
+        )
+
+    return options
+
+
+def mapping_command_options(selected_command: str = "open_1") -> str:
+    options = ""
+
+    for value, label in (
+        ("open_1", "Kanał 1 / GPIO26"),
+        ("open_2", "Kanał 2 / GPIO27"),
+        ("open_both", "Oba kanały"),
+    ):
+        selected = " selected" if value == selected_command else ""
+        options += f'<option value="{value}"{selected}>{label}</option>'
+
+    return options
+
 @router.get("/admin-panel", response_class=HTMLResponse)
 def admin_panel(
     request: Request,
@@ -129,6 +174,12 @@ def admin_panel(
 
     for token in tokens:
         url = public_url(f"/pilot/{token.token_value}")
+        virtual_buttons = virtual_buttons_for_token(db, token.id) if token.is_virtual else []
+        target_text = (
+            f"wirtualny ({len(virtual_buttons)} przyc.)"
+            if token.is_virtual
+            else token.gate_target
+        )
         client_use_limit_text = (
             str(token.max_uses_per_client)
             if token.max_uses_per_client is not None
@@ -158,7 +209,7 @@ def admin_panel(
             <td>{token.id}</td>
             <td>{html.escape(token.label or "")}</td>
             <td>{html.escape(display_pilot_title(token))}</td>
-            <td><code>{html.escape(token.gate_target)}</code></td>
+            <td><code>{html.escape(target_text)}</code></td>
             <td>{html.escape(token.status)}</td>
             <td>{token.used_count} / {token.max_uses if token.max_uses is not None else "∞"}</td>
             <td>{html.escape(client_use_limit_text)} / {html.escape(client_validity_text)}</td>
@@ -263,6 +314,13 @@ def admin_panel(
                 </div>
             </div>
 
+            <label>Rodzaj pilota</label>
+            <select id="pilot-kind" name="pilot_kind">
+                <option value="physical">Pilot jednego urządzenia</option>
+                <option value="virtual">Pilot wirtualny z wielu urządzeń</option>
+            </select>
+
+            <div id="physical-pilot-settings">
             <div class="grid">
                 <div>
                     <label>Urządzenie</label>
@@ -293,6 +351,7 @@ def admin_panel(
 
             <label>Nazwa przycisku „obie”</label>
             <input name="button_both_label" value="Obie bramy">
+            </div>
 
             <div class="grid">
                 <div>
@@ -321,6 +380,18 @@ def admin_panel(
 
             <button type="submit">Utwórz pilota</button>
         </form>
+
+        <script>
+            const pilotKind = document.getElementById("pilot-kind");
+            const physicalSettings = document.getElementById("physical-pilot-settings");
+
+            function updatePilotKind() {{
+                physicalSettings.hidden = pilotKind.value === "virtual";
+            }}
+
+            pilotKind.addEventListener("change", updatePilotKind);
+            updatePilotKind();
+        </script>
     </div>
 
     <div class="card">
@@ -437,6 +508,7 @@ async def admin_panel_create_token(
     button_1_label = str(form.get("button_1_label") or "")
     button_2_label = str(form.get("button_2_label") or "")
     button_both_label = str(form.get("button_both_label") or "")
+    is_virtual = str(form.get("pilot_kind") or "physical") == "virtual"
 
     device_id = str(form.get("device_id") or DEVICE_ID)
     gate_target = normalize_gate_target(str(form.get("gate_target") or "open_1"))
@@ -502,6 +574,7 @@ async def admin_panel_create_token(
         button_1_label=button_1_label,
         button_2_label=button_2_label,
         button_both_label=button_both_label,
+        is_virtual=is_virtual,
         device_id=device.device_id,
         gate_target=gate_target,
         status="active",
@@ -525,21 +598,28 @@ async def admin_panel_create_token(
         request=request,
         status="active",
         token=token,
-        message=f"Token created from admin panel for {gate_target}",
+        message=f"Token created from admin panel for {'virtual pilot' if is_virtual else gate_target}",
     )
 
     db.commit()
     db.refresh(token)
 
     url = public_url(f"/pilot/{token.token_value}")
+    target_text = "pilot wirtualny" if token.is_virtual else gate_target
+    configure_link = (
+        f'<a href="{public_path(f"/admin-panel/tokens/{token.id}/edit")}">Dodaj przyciski pilota</a><br>'
+        if token.is_virtual
+        else ""
+    )
 
     body = f"""
     <div class="card">
         <h1>Utworzono pilota</h1>
         <p><strong>{html.escape(display_pilot_title(token))}</strong></p>
-        <p>Cel: <code>{html.escape(gate_target)}</code></p>
+        <p>Cel: <code>{html.escape(target_text)}</code></p>
         <p><a href="{html.escape(url)}" target="_blank">Otwórz pilota</a></p>
         <p><code>{html.escape(url)}</code></p>
+        {configure_link}
         <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
     </div>
     """
@@ -595,28 +675,12 @@ def admin_panel_edit_token(
         "" if token.client_validity_hours is None else str(token.client_validity_hours)
     )
 
-    body = f"""
-    <div class="card">
-        <div class="top">
-            <h1>Edytuj pilota</h1>
-            <a href="{public_path('/admin-panel')}">Wróć</a>
-        </div>
-
-        <p class="muted">Link pilota pozostaje bez zmian.</p>
-        <p><code>{html.escape(public_url(f'/pilot/{token.token_value}'))}</code></p>
-
-        <form method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/update')}">
-            <div class="grid">
-                <div>
-                    <label>Opis techniczny</label>
-                    <input name="label" value="{html.escape(token.label or '')}">
-                </div>
-                <div>
-                    <label>Nazwa pilota</label>
-                    <input name="pilot_title" value="{html.escape(token.pilot_title or '')}">
-                </div>
-            </div>
-
+    if token.is_virtual:
+        routing_fields_html = """
+            <p><strong>Rodzaj:</strong> pilot wirtualny</p>
+        """
+    else:
+        routing_fields_html = f"""
             <div class="grid">
                 <div>
                     <label>Urządzenie</label>
@@ -641,6 +705,107 @@ def admin_panel_edit_token(
 
             <label>Nazwa przycisku „obie”</label>
             <input name="button_both_label" value="{html.escape(token.button_both_label or '')}">
+        """
+
+    virtual_config_html = ""
+
+    if token.is_virtual:
+        virtual_button_rows = ""
+        configured_buttons = virtual_buttons_for_token(db, token.id)
+
+        for button in configured_buttons:
+            edit_form_id = f"edit-virtual-button-{button.id}"
+            device_select = mapping_device_options(devices, button.device_id)
+            command_select = mapping_command_options(button.command)
+            virtual_button_rows += f"""
+            <tr>
+                <td><input form="{edit_form_id}" name="label" value="{html.escape(button.label)}" required maxlength="120"></td>
+                <td><select form="{edit_form_id}" name="device_id" required>{device_select}</select></td>
+                <td><select form="{edit_form_id}" name="command" required>{command_select}</select></td>
+                <td><input form="{edit_form_id}" name="sort_order" type="number" min="0" max="1000" value="{button.sort_order}"></td>
+                <td>
+                    <form id="{edit_form_id}" class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/buttons/{button.id}/update')}"></form>
+                    <button form="{edit_form_id}" class="compact" type="submit">Zapisz</button>
+                    <form class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/buttons/{button.id}/delete')}" onsubmit="return confirm('Usunąć ten przycisk?')">
+                        <button class="danger compact" type="submit">Usuń</button>
+                    </form>
+                </td>
+            </tr>
+            """
+
+        if not virtual_button_rows:
+            virtual_button_rows = "<tr><td colspan='5'>Brak przycisków.</td></tr>"
+
+        next_order = len(configured_buttons) * 10
+        add_device_options = mapping_device_options(
+            [device for device in devices if device.is_active]
+        )
+        virtual_config_html = f"""
+        <div class="card">
+            <h2>Przyciski pilota wirtualnego</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nazwa</th>
+                        <th>Urządzenie</th>
+                        <th>Kanał</th>
+                        <th>Kolejność</th>
+                        <th>Akcje</th>
+                    </tr>
+                </thead>
+                <tbody>{virtual_button_rows}</tbody>
+            </table>
+
+            <h3>Dodaj przycisk</h3>
+            <form method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/buttons')}">
+                <div class="grid">
+                    <div>
+                        <label>Nazwa</label>
+                        <input name="label" maxlength="120" required placeholder="np. Brama wjazdowa">
+                    </div>
+                    <div>
+                        <label>Urządzenie</label>
+                        <select name="device_id" required>{add_device_options}</select>
+                    </div>
+                </div>
+                <div class="grid">
+                    <div>
+                        <label>Kanał</label>
+                        <select name="command" required>{mapping_command_options()}</select>
+                    </div>
+                    <div>
+                        <label>Kolejność</label>
+                        <input name="sort_order" type="number" min="0" max="1000" value="{next_order}">
+                    </div>
+                </div>
+                <button type="submit">Dodaj przycisk</button>
+            </form>
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+        <div class="top">
+            <h1>Edytuj pilota</h1>
+            <a href="{public_path('/admin-panel')}">Wróć</a>
+        </div>
+
+        <p class="muted">Link pilota pozostaje bez zmian.</p>
+        <p><code>{html.escape(public_url(f'/pilot/{token.token_value}'))}</code></p>
+
+        <form method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/update')}">
+            <div class="grid">
+                <div>
+                    <label>Opis techniczny</label>
+                    <input name="label" value="{html.escape(token.label or '')}">
+                </div>
+                <div>
+                    <label>Nazwa pilota</label>
+                    <input name="pilot_title" value="{html.escape(token.pilot_title or '')}">
+                </div>
+            </div>
+
+            {routing_fields_html}
 
             <div class="grid">
                 <div>
@@ -673,6 +838,7 @@ def admin_panel_edit_token(
             <button type="submit">Zapisz zmiany</button>
         </form>
     </div>
+    {virtual_config_html}
     """
 
     return HTMLResponse(admin_panel_page("Edytuj pilota", body))
@@ -714,11 +880,6 @@ async def admin_panel_update_token(
     changes = {
         "label": str(form.get("label") or ""),
         "pilot_title": str(form.get("pilot_title") or ""),
-        "button_1_label": str(form.get("button_1_label") or ""),
-        "button_2_label": str(form.get("button_2_label") or ""),
-        "button_both_label": str(form.get("button_both_label") or ""),
-        "device_id": str(form.get("device_id") or ""),
-        "gate_target": str(form.get("gate_target") or ""),
         "valid_to": valid_to,
         "valid_forever": valid_forever,
         "max_uses": parse_optional_limit(str(form.get("max_uses") or "")),
@@ -731,6 +892,17 @@ async def admin_panel_update_token(
         "open_cooldown_seconds": cooldown,
         "is_active": bool(form.get("is_active")),
     }
+
+    if not token.is_virtual:
+        changes.update(
+            {
+                "button_1_label": str(form.get("button_1_label") or ""),
+                "button_2_label": str(form.get("button_2_label") or ""),
+                "button_both_label": str(form.get("button_both_label") or ""),
+                "device_id": str(form.get("device_id") or ""),
+                "gate_target": str(form.get("gate_target") or ""),
+            }
+        )
     result = update_access_token(
         db,
         token=token,
@@ -749,6 +921,99 @@ async def admin_panel_update_token(
     """
 
     return HTMLResponse(admin_panel_page("Zapisano pilota", body))
+
+
+@router.post("/admin-panel/tokens/{token_id}/buttons", response_class=HTMLResponse)
+async def admin_panel_create_virtual_button(
+    token_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    form = await request.form()
+    create_virtual_pilot_button(
+        db,
+        token=token,
+        label=str(form.get("label") or ""),
+        device_id=str(form.get("device_id") or ""),
+        command=str(form.get("command") or ""),
+        sort_order=parse_sort_order(str(form.get("sort_order") or "0")),
+        request=request,
+    )
+    return RedirectResponse(
+        public_path(f"/admin-panel/tokens/{token.id}/edit"),
+        status_code=303,
+    )
+
+
+@router.post("/admin-panel/tokens/{token_id}/buttons/{button_id}/update", response_class=HTMLResponse)
+async def admin_panel_update_virtual_button(
+    token_id: int,
+    button_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    button = virtual_button_or_404(db, token=token, button_id=button_id)
+    form = await request.form()
+    update_virtual_pilot_button(
+        db,
+        token=token,
+        button=button,
+        changes={
+            "label": str(form.get("label") or ""),
+            "device_id": str(form.get("device_id") or ""),
+            "command": str(form.get("command") or ""),
+            "sort_order": parse_sort_order(str(form.get("sort_order") or "0")),
+        },
+        request=request,
+    )
+    return RedirectResponse(
+        public_path(f"/admin-panel/tokens/{token.id}/edit"),
+        status_code=303,
+    )
+
+
+@router.post("/admin-panel/tokens/{token_id}/buttons/{button_id}/delete", response_class=HTMLResponse)
+def admin_panel_delete_virtual_button(
+    token_id: int,
+    button_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    button = virtual_button_or_404(db, token=token, button_id=button_id)
+    delete_virtual_pilot_button(
+        db,
+        token=token,
+        button=button,
+        request=request,
+    )
+    return RedirectResponse(
+        public_path(f"/admin-panel/tokens/{token.id}/edit"),
+        status_code=303,
+    )
 
 
 @router.post("/admin-panel/tokens/{token_id}/delete", response_class=HTMLResponse)
@@ -845,6 +1110,7 @@ async def admin_panel_delete_all_tokens(
     )
 
     db.query(TokenClientUsage).delete(synchronize_session=False)
+    db.query(VirtualPilotButton).delete(synchronize_session=False)
     db.query(AccessToken).delete(synchronize_session=False)
 
     log_event(
@@ -1235,6 +1501,7 @@ def admin_panel_delete_device_confirm(
 
         <p class="muted">
             Tokeny przypisane do urządzenia: {counts["tokens"]}<br>
+            Przyciski pilotów wirtualnych: {counts["virtual_buttons"]}<br>
             Komendy oczekujące/wysłane: {counts["pending_or_sent_commands"]}<br>
             Wszystkie komendy historycznie: {counts["all_commands"]}
         </p>
@@ -1295,6 +1562,11 @@ async def admin_panel_delete_device(
             synchronize_session=False,
         )
     )
+    deleted_virtual_buttons = (
+        db.query(VirtualPilotButton)
+        .filter(VirtualPilotButton.device_id == device.device_id)
+        .delete(synchronize_session=False)
+    )
 
     if delete_tokens:
         token_ids = [
@@ -1302,6 +1574,7 @@ async def admin_panel_delete_device(
             for (token_id,) in (
                 db.query(AccessToken.id)
                 .filter(AccessToken.device_id == device.device_id)
+                .filter(AccessToken.is_virtual.is_(False))
                 .all()
             )
         ]
@@ -1314,6 +1587,7 @@ async def admin_panel_delete_device(
         deleted_tokens = (
             db.query(AccessToken)
             .filter(AccessToken.device_id == device.device_id)
+            .filter(AccessToken.is_virtual.is_(False))
             .delete(synchronize_session=False)
         )
     else:
@@ -1330,7 +1604,7 @@ async def admin_panel_delete_device(
         request=request,
         status="ok",
         device_id=deleted_device_id,
-        message=f"Device deleted; delete_tokens={delete_tokens}; deleted_tokens={deleted_tokens}; cancelled_commands={cancelled_commands}",
+        message=f"Device deleted; delete_tokens={delete_tokens}; deleted_tokens={deleted_tokens}; deleted_virtual_buttons={deleted_virtual_buttons}; cancelled_commands={cancelled_commands}",
     )
 
     db.commit()
@@ -1341,6 +1615,7 @@ async def admin_panel_delete_device(
         <p>Device ID: <code>{html.escape(deleted_device_id)}</code></p>
         <p>Nazwa: {html.escape(deleted_device_name)}</p>
         <p>Usunięto tokenów: <strong>{deleted_tokens}</strong></p>
+        <p>Usunięto przycisków pilotów wirtualnych: <strong>{deleted_virtual_buttons}</strong></p>
         <p>Anulowano oczekujących/wysłanych komend: <strong>{cancelled_commands}</strong></p>
         <a href="{public_path('/admin-panel/devices')}">Wróć do urządzeń</a>
     </div>

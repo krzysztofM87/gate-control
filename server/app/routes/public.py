@@ -2,7 +2,7 @@ import html
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.config import (
@@ -18,6 +18,7 @@ from app.services import (
     client_usage_values,
     client_validity_values,
     create_command_from_token,
+    create_command_from_virtual_button,
     ensure_client_id,
     expire_pending_command,
     expire_pending_commands,
@@ -27,6 +28,7 @@ from app.services import (
     public_path,
     set_client_id_cookie,
     validate_access_token,
+    virtual_buttons_for_token,
 )
 from app.views import (
     display_button_label,
@@ -96,6 +98,13 @@ def gate_page(
     db: Session = Depends(get_db),
 ):
     token = validate_access_token(db, token_value, request)
+
+    if token.is_virtual:
+        return RedirectResponse(
+            public_path(f"/pilot/{token_value}"),
+            status_code=307,
+        )
+
     client_id, client_id_is_new = ensure_client_id(request)
     client_used_count, client_max_uses = client_usage_values(
         db,
@@ -299,31 +308,42 @@ def client_pilot_page(
         else "Limit użyć na tym telefonie został wykorzystany."
     )
 
-    if token.gate_target == "open_both":
+    if token.is_virtual:
+        color_classes = ("primary", "secondary", "danger")
         buttons = [
-            ("1", display_button_label(token, "open_1"), "primary"),
-            ("2", display_button_label(token, "open_2"), "secondary"),
-            ("both", display_button_label(token, "open_both"), "danger"),
+            (
+                public_path(f"/pilot/{token_value}/press-button/{button.id}"),
+                button.label,
+                color_classes[index % len(color_classes)],
+            )
+            for index, button in enumerate(virtual_buttons_for_token(db, token.id))
+        ]
+    elif token.gate_target == "open_both":
+        buttons = [
+            (public_path(f"/pilot/{token_value}/press/1"), display_button_label(token, "open_1"), "primary"),
+            (public_path(f"/pilot/{token_value}/press/2"), display_button_label(token, "open_2"), "secondary"),
+            (public_path(f"/pilot/{token_value}/press/both"), display_button_label(token, "open_both"), "danger"),
         ]
     elif token.gate_target == "open_2":
         buttons = [
-            ("2", display_button_label(token, "open_2"), "primary"),
+            (public_path(f"/pilot/{token_value}/press/2"), display_button_label(token, "open_2"), "primary"),
         ]
     else:
         buttons = [
-            ("1", display_button_label(token, "open_1"), "primary"),
+            (public_path(f"/pilot/{token_value}/press/1"), display_button_label(token, "open_1"), "primary"),
         ]
 
     buttons_html = ""
 
-    for gate, label, css_class in buttons:
-        press_url = public_path(f"/pilot/{token_value}/press/{gate}")
-
+    for press_url, label, css_class in buttons:
         buttons_html += f"""
         <button class="remote-button {css_class}" data-url="{html.escape(press_url)}">
             {html.escape(label)}
         </button>
         """
+
+    if not buttons_html:
+        buttons_html = '<div class="empty-buttons">Brak skonfigurowanych przycisków.</div>'
 
     max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
     client_max_uses_text = client_max_uses if client_max_uses is not None else "bez limitu"
@@ -404,6 +424,14 @@ def client_pilot_page(
         .step.active {{ color: #ffe9a6; }}
         .step.done {{ color: #b7ffc9; }}
         .buttons {{ display: grid; gap: 14px; }}
+        .empty-buttons {{
+            padding: 18px 12px;
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 8px;
+            color: #bbb;
+            text-align: center;
+            font-size: 14px;
+        }}
         .remote-button {{
             width: 100%;
             min-height: 78px;
@@ -828,6 +856,35 @@ def client_pilot_press(
         requested_gate=gate,
         request=request,
     )
+
+    return pilot_command_payload(db, token, command, request, token_value)
+
+
+@router.post("/pilot/{token_value}/press-button/{button_id}")
+def client_virtual_pilot_press(
+    token_value: str,
+    button_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = validate_access_token(db, token_value, request)
+    command = create_command_from_virtual_button(
+        db,
+        token=token,
+        button_id=button_id,
+        request=request,
+    )
+
+    return pilot_command_payload(db, token, command, request, token_value)
+
+
+def pilot_command_payload(
+    db: Session,
+    token: AccessToken,
+    command: Command,
+    request: Request,
+    token_value: str,
+) -> dict:
 
     db.refresh(token)
     client_used_count, client_max_uses = client_usage_values(

@@ -21,11 +21,19 @@ from app.config import (
     PUBLIC_PATH_PREFIX,
 )
 from app.database import engine
-from app.models import AccessToken, Command, CommandLog, Device, TokenClientUsage
+from app.models import (
+    AccessToken,
+    Command,
+    CommandLog,
+    Device,
+    TokenClientUsage,
+    VirtualPilotButton,
+)
 
 
 CLIENT_COOKIE_NAME = "gate_control_client_id"
 CLIENT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
+MAX_VIRTUAL_PILOT_BUTTONS = 12
 
 def now_utc() -> datetime:
     return datetime.utcnow()
@@ -553,6 +561,12 @@ def create_command_from_token(
     requested_gate: Optional[str],
     request: Request,
 ) -> Command:
+    if token.is_virtual:
+        raise HTTPException(
+            status_code=400,
+            detail="Virtual pilot requires a configured button",
+        )
+
     if requested_gate:
         requested_command = normalize_gate_target(requested_gate)
 
@@ -572,11 +586,28 @@ def create_command_from_token(
     else:
         command_name = token.gate_target
 
+    return create_command_for_target(
+        db,
+        token=token,
+        device_id=token.device_id,
+        command_name=command_name,
+        request=request,
+    )
+
+
+def create_command_for_target(
+    db: Session,
+    *,
+    token: AccessToken,
+    device_id: str,
+    command_name: str,
+    request: Request,
+) -> Command:
     consume_client_usage(db, token=token, request=request)
 
     command = Command(
         command_id=str(uuid.uuid4()),
-        device_id=token.device_id,
+        device_id=device_id,
         token_id=token.id,
         command=command_name,
         status="pending",
@@ -608,6 +639,199 @@ def create_command_from_token(
     return command
 
 
+def virtual_buttons_for_token(
+    db: Session,
+    token_id: int,
+) -> list[VirtualPilotButton]:
+    return (
+        db.query(VirtualPilotButton)
+        .filter(VirtualPilotButton.token_id == token_id)
+        .order_by(VirtualPilotButton.sort_order.asc(), VirtualPilotButton.id.asc())
+        .all()
+    )
+
+
+def virtual_button_or_404(
+    db: Session,
+    *,
+    token: AccessToken,
+    button_id: int,
+) -> VirtualPilotButton:
+    button = (
+        db.query(VirtualPilotButton)
+        .filter(VirtualPilotButton.id == button_id)
+        .filter(VirtualPilotButton.token_id == token.id)
+        .first()
+    )
+
+    if button is None:
+        raise HTTPException(status_code=404, detail="Virtual pilot button not found")
+
+    return button
+
+
+def create_command_from_virtual_button(
+    db: Session,
+    *,
+    token: AccessToken,
+    button_id: int,
+    request: Request,
+) -> Command:
+    if not token.is_virtual:
+        raise HTTPException(status_code=400, detail="Token is not a virtual pilot")
+
+    button = virtual_button_or_404(db, token=token, button_id=button_id)
+    device = db.query(Device).filter(Device.device_id == button.device_id).first()
+
+    if device is None or not device.is_active:
+        log_event(
+            db,
+            event_type="open_rejected",
+            request=request,
+            status="virtual_button_device_unavailable",
+            token=token,
+            device_id=button.device_id,
+            message="Virtual pilot button device is unavailable",
+        )
+        db.commit()
+        raise HTTPException(status_code=403, detail="Urządzenie tego przycisku jest niedostępne")
+
+    return create_command_for_target(
+        db,
+        token=token,
+        device_id=button.device_id,
+        command_name=button.command,
+        request=request,
+    )
+
+
+def create_virtual_pilot_button(
+    db: Session,
+    *,
+    token: AccessToken,
+    label: str,
+    device_id: str,
+    command: str,
+    sort_order: int,
+    request: Optional[Request] = None,
+) -> VirtualPilotButton:
+    if not token.is_virtual:
+        raise HTTPException(status_code=400, detail="Token is not a virtual pilot")
+
+    if db.query(VirtualPilotButton).filter(VirtualPilotButton.token_id == token.id).count() >= MAX_VIRTUAL_PILOT_BUTTONS:
+        raise HTTPException(status_code=400, detail="Virtual pilot button limit reached")
+
+    label = label.strip()
+
+    if not label:
+        raise HTTPException(status_code=400, detail="Button label is required")
+
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if not device.is_active:
+        raise HTTPException(status_code=400, detail="Device is inactive")
+
+    button = VirtualPilotButton(
+        token_id=token.id,
+        label=label[:120],
+        device_id=device.device_id,
+        command=normalize_gate_target(command),
+        sort_order=max(0, min(sort_order, 1000)),
+    )
+    db.add(button)
+    db.flush()
+
+    log_event(
+        db,
+        event_type="virtual_button_created",
+        request=request,
+        status="ok",
+        token=token,
+        device_id=button.device_id,
+        message=f"Virtual button {button.id} created for {button.command}",
+    )
+    db.commit()
+    db.refresh(button)
+    return button
+
+
+def update_virtual_pilot_button(
+    db: Session,
+    *,
+    token: AccessToken,
+    button: VirtualPilotButton,
+    changes: dict,
+    request: Optional[Request] = None,
+) -> VirtualPilotButton:
+    unknown_fields = set(changes) - {"label", "device_id", "command", "sort_order"}
+
+    if unknown_fields:
+        raise HTTPException(status_code=400, detail="Unsupported virtual button fields")
+
+    if "label" in changes:
+        label = str(changes["label"]).strip()
+
+        if not label:
+            raise HTTPException(status_code=400, detail="Button label is required")
+
+        button.label = label[:120]
+
+    if "device_id" in changes:
+        device = db.query(Device).filter(Device.device_id == changes["device_id"]).first()
+
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        if not device.is_active and device.device_id != button.device_id:
+            raise HTTPException(status_code=400, detail="Device is inactive")
+
+        button.device_id = device.device_id
+
+    if "command" in changes:
+        button.command = normalize_gate_target(str(changes["command"]))
+
+    if "sort_order" in changes:
+        button.sort_order = max(0, min(int(changes["sort_order"]), 1000))
+
+    log_event(
+        db,
+        event_type="virtual_button_updated",
+        request=request,
+        status="ok",
+        token=token,
+        device_id=button.device_id,
+        message=f"Virtual button {button.id} updated",
+    )
+    db.commit()
+    db.refresh(button)
+    return button
+
+
+def delete_virtual_pilot_button(
+    db: Session,
+    *,
+    token: AccessToken,
+    button: VirtualPilotButton,
+    request: Optional[Request] = None,
+) -> None:
+    button_id = button.id
+    device_id = button.device_id
+    db.delete(button)
+    log_event(
+        db,
+        event_type="virtual_button_deleted",
+        request=request,
+        status="ok",
+        token=token,
+        device_id=device_id,
+        message=f"Virtual button {button_id} deleted",
+    )
+    db.commit()
+
+
 def delete_access_token(
     db: Session,
     *,
@@ -634,6 +858,11 @@ def delete_access_token(
         .filter(TokenClientUsage.token_id == token_id)
         .delete(synchronize_session=False)
     )
+    deleted_virtual_buttons = (
+        db.query(VirtualPilotButton)
+        .filter(VirtualPilotButton.token_id == token_id)
+        .delete(synchronize_session=False)
+    )
 
     log_event(
         db,
@@ -643,7 +872,8 @@ def delete_access_token(
         token=token,
         message=(
             f"Token deleted; cancelled_commands={cancelled_commands}; "
-            f"deleted_client_usages={deleted_client_usages}"
+            f"deleted_client_usages={deleted_client_usages}; "
+            f"deleted_virtual_buttons={deleted_virtual_buttons}"
         ),
     )
 
@@ -655,6 +885,7 @@ def delete_access_token(
         "label": token_label,
         "cancelled_commands": cancelled_commands,
         "deleted_client_usages": deleted_client_usages,
+        "deleted_virtual_buttons": deleted_virtual_buttons,
     }
 
 
@@ -838,6 +1069,7 @@ def run_schema_migrations() -> None:
             "valid_forever": "ALTER TABLE access_tokens ADD COLUMN valid_forever BOOLEAN DEFAULT 0",
             "max_uses_per_client": "ALTER TABLE access_tokens ADD COLUMN max_uses_per_client INTEGER",
             "client_validity_hours": "ALTER TABLE access_tokens ADD COLUMN client_validity_hours INTEGER",
+            "is_virtual": "ALTER TABLE access_tokens ADD COLUMN is_virtual BOOLEAN DEFAULT 0",
         }
 
         for name, sql in migrations.items():
@@ -854,7 +1086,30 @@ def device_or_404(db: Session, device_id: str) -> Device:
 
 
 def device_counts(db: Session, device_id: str) -> dict:
-    tokens_count = db.query(AccessToken).filter(AccessToken.device_id == device_id).count()
+    physical_token_ids = {
+        token_id
+        for (token_id,) in (
+            db.query(AccessToken.id)
+            .filter(AccessToken.device_id == device_id)
+            .filter(AccessToken.is_virtual.is_(False))
+            .all()
+        )
+    }
+    virtual_token_ids = {
+        token_id
+        for (token_id,) in (
+            db.query(VirtualPilotButton.token_id)
+            .filter(VirtualPilotButton.device_id == device_id)
+            .distinct()
+            .all()
+        )
+    }
+    virtual_buttons_count = (
+        db.query(VirtualPilotButton)
+        .filter(VirtualPilotButton.device_id == device_id)
+        .count()
+    )
+    tokens_count = len(physical_token_ids | virtual_token_ids)
 
     pending_count = (
         db.query(Command)
@@ -867,6 +1122,7 @@ def device_counts(db: Session, device_id: str) -> dict:
 
     return {
         "tokens": tokens_count,
+        "virtual_buttons": virtual_buttons_count,
         "pending_or_sent_commands": pending_count,
         "all_commands": all_commands_count,
     }

@@ -7,11 +7,19 @@ from sqlalchemy.orm import Session
 
 from app.config import DEVICE_ID, FOREVER_VALID_TO
 from app.database import get_db
-from app.models import AccessToken, Command, Device, TokenClientUsage
-from app.schemas import CreateDeviceRequest, CreateTokenRequest, UpdateTokenRequest
+from app.models import AccessToken, Command, Device, TokenClientUsage, VirtualPilotButton
+from app.schemas import (
+    CreateDeviceRequest,
+    CreateTokenRequest,
+    UpdateTokenRequest,
+    UpdateVirtualPilotButtonRequest,
+    VirtualPilotButtonRequest,
+)
 from app.services import (
     check_admin_auth,
+    create_virtual_pilot_button,
     delete_access_token,
+    delete_virtual_pilot_button,
     device_counts,
     expire_pending_commands,
     log_event,
@@ -20,10 +28,23 @@ from app.services import (
     public_url,
     reactivate_access_token,
     update_access_token,
+    update_virtual_pilot_button,
+    virtual_button_or_404,
+    virtual_buttons_for_token,
 )
 
 
 router = APIRouter()
+
+
+def virtual_button_payload(button: VirtualPilotButton) -> dict:
+    return {
+        "id": button.id,
+        "label": button.label,
+        "device_id": button.device_id,
+        "command": button.command,
+        "sort_order": button.sort_order,
+    }
 
 @router.post("/admin/devices")
 def admin_create_device(
@@ -87,6 +108,7 @@ def admin_create_token(
         button_1_label=payload.button_1_label,
         button_2_label=payload.button_2_label,
         button_both_label=payload.button_both_label,
+        is_virtual=payload.is_virtual,
         device_id=device.device_id,
         gate_target=gate_target,
         status="active",
@@ -110,7 +132,7 @@ def admin_create_token(
         request=request,
         status="active",
         token=token,
-        message=f"Token created for {gate_target}",
+        message=f"Token created for {'virtual pilot' if token.is_virtual else gate_target}",
     )
 
     db.commit()
@@ -122,6 +144,8 @@ def admin_create_token(
         "public_url": public_url(f"/pilot/{token.token_value}"),
         "device_id": token.device_id,
         "gate_target": token.gate_target,
+        "is_virtual": token.is_virtual,
+        "buttons": [],
         "valid_from": token.valid_from.isoformat(),
         "valid_to": None if getattr(token, "valid_forever", False) else token.valid_to.isoformat(),
         "valid_forever": getattr(token, "valid_forever", False),
@@ -155,6 +179,11 @@ def admin_list_tokens(
                 "public_url": public_url(f"/pilot/{token.token_value}"),
                 "device_id": token.device_id,
                 "gate_target": token.gate_target,
+                "is_virtual": token.is_virtual,
+                "buttons": [
+                    virtual_button_payload(button)
+                    for button in virtual_buttons_for_token(db, token.id)
+                ],
                 "status": token.status,
                 "is_active": token.is_active,
                 "valid_from": token.valid_from.isoformat(),
@@ -254,6 +283,11 @@ def admin_update_token(
         "public_url": public_url(f"/pilot/{token.token_value}"),
         "device_id": token.device_id,
         "gate_target": token.gate_target,
+        "is_virtual": token.is_virtual,
+        "buttons": [
+            virtual_button_payload(button)
+            for button in virtual_buttons_for_token(db, token.id)
+        ],
         "is_active": token.is_active,
         "valid_to": None if token.valid_forever else token.valid_to.isoformat(),
         "valid_forever": token.valid_forever,
@@ -285,6 +319,87 @@ def admin_delete_token(
         "status": "ok",
         **result,
     }
+
+
+@router.post("/admin/tokens/{token_id}/buttons")
+def admin_create_virtual_button(
+    token_id: int,
+    payload: VirtualPilotButtonRequest,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    button = create_virtual_pilot_button(
+        db,
+        token=token,
+        label=payload.label,
+        device_id=payload.device_id,
+        command=payload.command,
+        sort_order=payload.sort_order,
+        request=request,
+    )
+    return {"status": "ok", "button": virtual_button_payload(button)}
+
+
+@router.patch("/admin/tokens/{token_id}/buttons/{button_id}")
+def admin_update_virtual_button(
+    token_id: int,
+    button_id: int,
+    payload: UpdateVirtualPilotButtonRequest,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    button = virtual_button_or_404(db, token=token, button_id=button_id)
+    changes = payload.model_dump(exclude_unset=True)
+
+    if any(value is None for value in changes.values()):
+        raise HTTPException(status_code=400, detail="Virtual button fields cannot be null")
+
+    button = update_virtual_pilot_button(
+        db,
+        token=token,
+        button=button,
+        changes=changes,
+        request=request,
+    )
+    return {"status": "ok", "button": virtual_button_payload(button)}
+
+
+@router.delete("/admin/tokens/{token_id}/buttons/{button_id}")
+def admin_delete_virtual_button(
+    token_id: int,
+    button_id: int,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    button = virtual_button_or_404(db, token=token, button_id=button_id)
+    delete_virtual_pilot_button(
+        db,
+        token=token,
+        button=button,
+        request=request,
+    )
+    return {"status": "ok", "button_id": button_id}
 
 
 @router.post("/admin/tokens/{token_id}/reactivate")
@@ -339,6 +454,7 @@ def admin_delete_all_tokens(
     )
 
     db.query(TokenClientUsage).delete(synchronize_session=False)
+    db.query(VirtualPilotButton).delete(synchronize_session=False)
     db.query(AccessToken).delete(synchronize_session=False)
 
     log_event(
