@@ -18,6 +18,7 @@ from app.services import (
     normalize_gate_target,
     now_utc,
     public_url,
+    reactivate_access_token,
     update_access_token,
 )
 
@@ -283,6 +284,33 @@ def admin_delete_token(
     return {
         "status": "ok",
         **result,
+    }
+
+
+@router.post("/admin/tokens/{token_id}/reactivate")
+def admin_reactivate_token(
+    token_id: int,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    result = reactivate_access_token(db, token=token, request=request)
+
+    return {
+        "status": "ok",
+        **result,
+        "token": token.token_value,
+        "public_url": public_url(f"/pilot/{token.token_value}"),
+        "valid_to": None if token.valid_forever else token.valid_to.isoformat(),
+        "valid_forever": token.valid_forever,
+        "used_count": token.used_count,
     }
 
 @router.post("/admin/tokens/delete-all")

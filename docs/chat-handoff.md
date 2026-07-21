@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po wdrozeniu waznosci pilota osobno na telefon. Ostatni deploy na VPS: `Add per-phone pilot validity`.
+Ostatnia aktualizacja: 2026-07-21, po wdrozeniu reaktywacji tokenu i komunikatu o wyczerpanym limicie. Ostatni deploy na VPS: `Add token reactivation and limit notice`.
 
 Po podziale `main.py` naprawiono dwa bledy wykonania pilota: brak zwracania komendy z `create_command_from_token()` oraz brak importu `AccessToken` w endpointcie sprawdzajacym status komendy. Frontend pilota obsluguje tez odpowiedzi serwera, ktore nie sa JSON-em, i pokazuje wtedy czytelny blad HTTP.
 
@@ -110,7 +110,7 @@ Glowny przeplyw:
 
 Komenda moze pozostac `pending` maksymalnie przez `COMMAND_PENDING_TIMEOUT_SECONDS` (domyslnie 15 sekund). Po tym czasie backend zmienia jej status na `failed` przed kolejnym odczytem statusu lub pollingiem urzadzenia. Wygasla komenda nie jest zwracana do ESP32. Stare komendy sa tez wygaszane przy starcie aplikacji oraz podczas odczytu panelu/listy komend.
 
-Testy regresyjne timeoutu, limitu uzyc i waznosci na telefon oraz usuwania i edycji tokenu znajduja sie w `server/tests/`. Uruchamia sie je poleceniem `python -m unittest discover -s tests` z katalogu `server` lub `/app` w kontenerze.
+Testy regresyjne timeoutu, limitu uzyc i waznosci na telefon oraz usuwania, edycji i reaktywacji tokenu znajduja sie w `server/tests/`. Uruchamia sie je poleceniem `python -m unittest discover -s tests` z katalogu `server` lub `/app` w kontenerze.
 
 Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
 
@@ -119,6 +119,8 @@ Pilot moze miec opcjonalne `max_uses_per_client` i `client_validity_hours`. Prze
 Pojedynczy pilot mozna usunac z tabeli tokenow w panelu albo przez `DELETE /admin/tokens/{token_id}`. Operacja usuwa token i jego liczniki telefonow, anuluje komendy `pending`/`sent`, ale zachowuje wykonane komendy i logi.
 
 Pilot mozna edytowac bez zmiany jego tajnego linku. Panel pozwala zmienic nazwy, urzadzenie, typ pilota, waznosc, limity, cooldown i aktywnosc. Admin API udostepnia `PATCH /admin/tokens/{token_id}`. Zmiana urzadzenia/kanalu albo ustawienie nieaktywnego statusu anuluje niewykonane komendy tego pilota. Liczniki dotychczasowych uzyc pozostaja bez zmian.
+
+Wyczerpany, wylaczony albo wygasly pilot mozna reaktywowac z tabeli tokenow lub przez `POST /admin/tokens/{token_id}/reactivate`. Reaktywacja zachowuje ten sam tajny link, zeruje licznik globalny i liczniki telefonow, uruchamia od nowa ich okna waznosci, odnawia globalna waznosc o pierwotny okres oraz anuluje stare komendy `pending`/`sent`. Strona wyczerpanego pilota pokazuje czytelny komunikat HTML zamiast surowego bledu API; po wykorzystaniu ostatniego uzycia komunikat pojawia sie tez bez odswiezania strony.
 
 Panel admina przy tworzeniu pilota wybiera urzadzenie z listy urzadzen z bazy. Aktywne urzadzenia sa wybieralne, wylaczone sa pokazane jako niedostepne. Typ pilota wybiera sie jako:
 
@@ -158,6 +160,7 @@ GET  /admin/devices
 POST /admin/tokens
 GET  /admin/tokens
 PATCH /admin/tokens/{token_id}
+POST /admin/tokens/{token_id}/reactivate
 DELETE /admin/tokens/{token_id}
 GET  /admin/commands
 POST /admin/tokens/delete-all
@@ -172,6 +175,7 @@ POST /admin-panel/logout
 POST /admin-panel/tokens
 GET  /admin-panel/tokens/{token_id}/edit
 POST /admin-panel/tokens/{token_id}/update
+POST /admin-panel/tokens/{token_id}/reactivate
 POST /admin-panel/tokens/{token_id}/delete
 POST /admin-panel/tokens/delete-all
 GET  /admin-panel/devices
@@ -424,7 +428,7 @@ $env:GATE_DEVICE_SECRET = "..."
 
 - `/debug/state` jest publiczne.
 - Panel admina i Admin API pokazuja pelne tokeny oraz sekrety urzadzen.
-- Pokrycie automatycznymi testami jest ograniczone do timeoutu komend, limitu uzyc i waznosci na telefon oraz usuwania i edycji tokenu.
+- Pokrycie automatycznymi testami jest ograniczone do timeoutu komend, limitu uzyc i waznosci na telefon oraz usuwania, edycji i reaktywacji tokenu.
 - Brak Alembica; migracje sa proste i reczne w `run_schema_migrations()`.
 - W odpowiedziach JSON sa drobne powtorzenia klucza `valid_forever`.
 - Firmware nie obsluguje HTTPS.

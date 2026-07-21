@@ -27,6 +27,7 @@ from app.services import (
     now_utc,
     public_path,
     public_url,
+    reactivate_access_token,
     update_access_token,
 )
 from app.views import (
@@ -138,6 +139,20 @@ def admin_panel(
             if token.client_validity_hours is not None
             else "bez terminu"
         )
+        needs_reactivation = (
+            not token.is_active
+            or token.status != "active"
+            or (not token.valid_forever and token.valid_to < now_utc())
+            or (token.max_uses is not None and token.used_count >= token.max_uses)
+        )
+        reactivate_action = ""
+
+        if needs_reactivation:
+            reactivate_action = f"""
+                <form class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/reactivate')}" onsubmit="return confirm('Ponownie aktywować pilot i wyzerować jego liczniki?')">
+                    <button class="compact" type="submit">Reaktywuj</button>
+                </form>
+            """
         token_rows += f"""
         <tr>
             <td>{token.id}</td>
@@ -151,6 +166,7 @@ def admin_panel(
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
             <td>
                 <a class="action-link" href="{public_path(f'/admin-panel/tokens/{token.id}/edit')}">Edytuj</a>
+                {reactivate_action}
                 <form class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/delete')}" onsubmit="return confirm('Usunąć ten pilot?')">
                     <button class="danger compact" type="submit">Usuń</button>
                 </form>
@@ -762,6 +778,36 @@ def admin_panel_delete_token(
     """
 
     return HTMLResponse(admin_panel_page("Usunięto pilota", body))
+
+
+@router.post("/admin-panel/tokens/{token_id}/reactivate", response_class=HTMLResponse)
+def admin_panel_reactivate_token(
+    token_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    result = reactivate_access_token(db, token=token, request=request)
+
+    body = f"""
+    <div class="card">
+        <h1>Pilot ponownie aktywny</h1>
+        <p><strong>{html.escape(display_pilot_title(token))}</strong></p>
+        <p>Wyzerowano licznik użyć oraz urządzenia/telefony: <strong>{result['reset_client_usages']}</strong>.</p>
+        <p>Anulowano niewykonane komendy: <strong>{result['cancelled_commands']}</strong>.</p>
+        <p>Ważny do: <strong>{html.escape(token_valid_to_text(token))}</strong></p>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Pilot aktywny", body))
 
 @router.post("/admin-panel/tokens/delete-all", response_class=HTMLResponse)
 async def admin_panel_delete_all_tokens(

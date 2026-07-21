@@ -51,6 +51,19 @@ def client_validity_text(
 
     return format_dt(valid_until)
 
+
+def pilot_limit_reached_response(token: AccessToken) -> HTMLResponse:
+    title = display_pilot_title(token)
+    body = f"""
+        <h1>Limit użyć wyczerpany</h1>
+        <p>Pilot <strong>{html.escape(title)}</strong> wykorzystał wszystkie dostępne użycia.</p>
+        <p>Nie można wysłać kolejnej komendy. Administrator może ponownie aktywować pilot bez zmiany jego linku.</p>
+    """
+    return HTMLResponse(
+        render_page("Limit użyć wyczerpany", body),
+        status_code=403,
+    )
+
 @router.get("/health")
 def health():
     return {
@@ -252,7 +265,21 @@ def client_pilot_page(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    token = validate_access_token(db, token_value, request)
+    try:
+        token = validate_access_token(db, token_value, request)
+    except HTTPException as error:
+        if error.status_code == 403 and error.detail == "Token use limit reached":
+            token = (
+                db.query(AccessToken)
+                .filter(AccessToken.token_value == token_value)
+                .first()
+            )
+
+            if token is not None:
+                return pilot_limit_reached_response(token)
+
+        raise
+
     client_id, client_id_is_new = ensure_client_id(request)
     client_used_count, client_max_uses = client_usage_values(
         db,
@@ -358,6 +385,20 @@ def client_pilot_page(
         .status.ok {{ color: #b7ffc9; border-color: rgba(75, 255, 120, .3); }}
         .status.wait {{ color: #ffe9a6; border-color: rgba(255, 220, 80, .35); }}
         .status.err {{ color: #ffc1c1; border-color: rgba(255, 80, 80, .35); }}
+        .limit-alert {{
+            display: none;
+            margin-bottom: 14px;
+            padding: 12px;
+            border: 1px solid rgba(255, 80, 80, .55);
+            border-radius: 8px;
+            background: #321313;
+            color: #ffd0d0;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.4;
+        }}
+        .limit-alert.visible {{ display: block; }}
+        .limit-alert strong {{ display: block; margin-bottom: 4px; }}
         .steps {{ display: grid; gap: 6px; margin-bottom: 18px; font-size: 13px; color: #777; }}
         .step {{ background: rgba(255,255,255,.04); border-radius: 10px; padding: 8px 10px; }}
         .step.active {{ color: #ffe9a6; }}
@@ -457,6 +498,11 @@ def client_pilot_page(
 
         <div id="status" class="status">Gotowy</div>
 
+        <div id="limit-alert" class="limit-alert">
+            <strong id="limit-alert-title"></strong>
+            <span id="limit-alert-message"></span>
+        </div>
+
         <div class="steps">
             <div id="step-created" class="step">1. Komenda zapisana na serwerze</div>
             <div id="step-sent" class="step">2. Sterownik odebrał komendę</div>
@@ -487,9 +533,14 @@ def client_pilot_page(
         const clientUsageCountEl = document.getElementById("client-usage-count");
         const clientUsageMaxEl = document.getElementById("client-usage-max");
         const clientValidityEl = document.getElementById("client-validity");
+        const limitAlertEl = document.getElementById("limit-alert");
+        const limitAlertTitleEl = document.getElementById("limit-alert-title");
+        const limitAlertMessageEl = document.getElementById("limit-alert-message");
 
         let readyTimer = null;
         let clientAccessBlocked = {"true" if client_blocked else "false"};
+        let clientBlockMessage = "{client_block_message}";
+        let tokenLimitReached = false;
 
         function setStatus(text, mode) {{
             statusEl.textContent = text;
@@ -507,11 +558,40 @@ def client_pilot_page(
             [stepCreated, stepSent, stepDone].forEach(step => step.className = "step");
         }}
 
+        function isAccessBlocked() {{
+            return tokenLimitReached || clientAccessBlocked;
+        }}
+
+        function refreshLimitAlert() {{
+            if (tokenLimitReached) {{
+                limitAlertTitleEl.textContent = "Limit użyć pilota wyczerpany";
+                limitAlertMessageEl.textContent = "Pilot nie może wysłać kolejnej komendy.";
+                limitAlertEl.classList.add("visible");
+                return;
+            }}
+
+            if (clientAccessBlocked) {{
+                limitAlertTitleEl.textContent = "Pilot niedostępny na tym telefonie";
+                limitAlertMessageEl.textContent = clientBlockMessage;
+                limitAlertEl.classList.add("visible");
+                return;
+            }}
+
+            limitAlertEl.classList.remove("visible");
+        }}
+
         function scheduleReady() {{
             clearReadyTimer();
             readyTimer = setTimeout(() => {{
                 resetSteps();
-                setStatus("Gotowy", "");
+
+                if (tokenLimitReached) {{
+                    setStatus("Limit użyć pilota został wyczerpany.", "err");
+                }} else if (clientAccessBlocked) {{
+                    setStatus(clientBlockMessage, "err");
+                }} else {{
+                    setStatus("Gotowy", "");
+                }}
             }}, 2500);
         }}
 
@@ -520,7 +600,7 @@ def client_pilot_page(
         }}
 
         function setBusy(isBusy) {{
-            buttons.forEach(button => button.disabled = isBusy || clientAccessBlocked);
+            buttons.forEach(button => button.disabled = isBusy || isAccessBlocked());
             ledEl.classList.toggle("on", isBusy);
         }}
 
@@ -549,11 +629,24 @@ def client_pilot_page(
 
             const clientUsedCount = Number(clientUsageCountEl.textContent);
             const clientMaxUses = data.client_max_uses;
+            const usedCount = Number(usageCountEl.textContent);
+            const maxUses = data.max_uses;
             const clientLimitReached = clientMaxUses !== null
                 && typeof clientMaxUses !== "undefined"
                 && clientUsedCount >= Number(clientMaxUses);
             const clientValidityExpired = data.client_validity_expired === true;
+            tokenLimitReached = maxUses !== null
+                && typeof maxUses !== "undefined"
+                && usedCount >= Number(maxUses);
             clientAccessBlocked = clientLimitReached || clientValidityExpired;
+
+            if (clientValidityExpired) {{
+                clientBlockMessage = "Ważność pilota na tym telefonie wygasła.";
+            }} else if (clientLimitReached) {{
+                clientBlockMessage = "Limit użyć na tym telefonie został wykorzystany.";
+            }}
+
+            refreshLimitAlert();
         }}
 
         async function readJsonResponse(response) {{
@@ -652,15 +745,22 @@ def client_pilot_page(
                 updateUsage(data);
 
                 if (!response.ok) {{
-                    const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+                    let message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+
+                    if (message === "Token use limit reached") {{
+                        tokenLimitReached = true;
+                        message = "Limit użyć pilota został wyczerpany.";
+                    }}
 
                     if (response.status === 403 && (
                         message.includes("na tym telefonie")
                         || message.includes("tym telefonie")
                     )) {{
                         clientAccessBlocked = true;
+                        clientBlockMessage = message;
                     }}
 
+                    refreshLimitAlert();
                     setStatus(message, "err");
                     return;
                 }}
@@ -694,7 +794,9 @@ def client_pilot_page(
             }});
         }});
 
-        if (clientAccessBlocked) {{
+        refreshLimitAlert();
+
+        if (isAccessBlocked()) {{
             setStatus("{client_block_message}", "err");
             setBusy(false);
         }}

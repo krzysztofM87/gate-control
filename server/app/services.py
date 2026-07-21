@@ -462,7 +462,7 @@ def validate_access_token(db: Session, token_value: str, request: Request) -> Ac
 
     now = now_utc()
 
-    if not token.is_active or token.status != "active":
+    if not token.is_active:
         log_event(
             db,
             event_type="token_rejected",
@@ -511,6 +511,18 @@ def validate_access_token(db: Session, token_value: str, request: Request) -> Ac
         )
         db.commit()
         raise HTTPException(status_code=403, detail="Token use limit reached")
+
+    if token.status != "active":
+        log_event(
+            db,
+            event_type="token_rejected",
+            request=request,
+            status="inactive",
+            token=token,
+            message=f"Token status is {token.status}",
+        )
+        db.commit()
+        raise HTTPException(status_code=403, detail="Token inactive")
 
     if token.last_used_at and token.open_cooldown_seconds > 0:
         elapsed = (now - token.last_used_at).total_seconds()
@@ -639,6 +651,71 @@ def delete_access_token(
         "label": token_label,
         "cancelled_commands": cancelled_commands,
         "deleted_client_usages": deleted_client_usages,
+    }
+
+
+def reactivate_access_token(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Optional[Request] = None,
+) -> dict:
+    current_time = now_utc()
+    validity_duration = None
+
+    if not token.valid_forever:
+        validity_duration = token.valid_to - token.valid_from
+
+        if validity_duration <= timedelta(0):
+            raise HTTPException(status_code=400, detail="Token validity period is invalid")
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.token_id == token.id)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because access token was reactivated",
+            },
+            synchronize_session=False,
+        )
+    )
+    reset_client_usages = (
+        db.query(TokenClientUsage)
+        .filter(TokenClientUsage.token_id == token.id)
+        .delete(synchronize_session=False)
+    )
+
+    token.is_active = True
+    token.status = "active"
+    token.used_count = 0
+    token.last_used_at = None
+    token.valid_from = current_time
+
+    if validity_duration is not None:
+        token.valid_to = current_time + validity_duration
+
+    log_event(
+        db,
+        event_type="token_reactivated",
+        request=request,
+        status="active",
+        token=token,
+        message=(
+            f"Token reactivated; cancelled_commands={cancelled_commands}; "
+            f"reset_client_usages={reset_client_usages}"
+        ),
+    )
+
+    db.commit()
+    db.refresh(token)
+
+    return {
+        "token_id": token.id,
+        "status": token.status,
+        "cancelled_commands": cancelled_commands,
+        "reset_client_usages": reset_client_usages,
     }
 
 
