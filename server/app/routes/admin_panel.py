@@ -58,6 +58,12 @@ def admin_panel(
         .all()
     )
 
+    devices = (
+        db.query(Device)
+        .order_by(Device.name.asc(), Device.device_id.asc())
+        .all()
+    )
+
     token_rows = ""
 
     for token in tokens:
@@ -96,6 +102,37 @@ def admin_panel(
     if not command_rows:
         command_rows = "<tr><td colspan='7'>Brak komend.</td></tr>"
 
+    active_devices = [device for device in devices if device.is_active]
+    selected_device_id = ""
+
+    if any(device.device_id == DEVICE_ID for device in active_devices):
+        selected_device_id = DEVICE_ID
+    elif active_devices:
+        selected_device_id = active_devices[0].device_id
+
+    device_options = ""
+
+    if devices and not active_devices:
+        device_options = """
+                        <option value="" disabled selected>Brak aktywnych urządzeń</option>
+        """
+
+    for device in devices:
+        selected = " selected" if device.device_id == selected_device_id else ""
+        disabled = " disabled" if not device.is_active else ""
+        status_text = "" if device.is_active else " (wyłączone)"
+        name_text = f"{device.name} - " if device.name else ""
+        label = f"{name_text}{device.device_id}{status_text}"
+
+        device_options += f"""
+                        <option value="{html.escape(device.device_id)}"{selected}{disabled}>{html.escape(label)}</option>
+        """
+
+    if not device_options:
+        device_options = """
+                        <option value="" disabled selected>Brak urządzeń - dodaj ESP32 w zakładce urządzeń</option>
+        """
+
     body = f"""
     <div class="top">
         <h1>Gate Control - panel admina</h1>
@@ -111,7 +148,7 @@ def admin_panel(
             Oczekujące komendy zostaną anulowane.
         </p>
 
-        <form method="post" action="/gate-control/admin-panel/tokens/delete-all">
+        <form method="post" action="{public_path('/admin-panel/tokens/delete-all')}">
             <label>Potwierdzenie</label>
             <input name="confirm" placeholder="Wpisz: USUN" autocomplete="off">
 
@@ -136,14 +173,16 @@ def admin_panel(
             <div class="grid">
                 <div>
                     <label>Urządzenie</label>
-                    <input name="device_id" value="{html.escape(DEVICE_ID)}">
+                    <select name="device_id" required>
+                        {device_options}
+                    </select>
                 </div>
                 <div>
-                    <label>Brama / kanał</label>
+                    <label>Typ pilota</label>
                     <select name="gate_target">
-                        <option value="open_1">Tylko przycisk 1 / GPIO26</option>
-                        <option value="open_2">Tylko przycisk 2 / GPIO27</option>
-                        <option value="open_both">Pilot z trzema przyciskami</option>
+                        <option value="open_1">1 przycisk - brama 1 / GPIO26</option>
+                        <option value="open_2">1 przycisk - brama 2 / GPIO27</option>
+                        <option value="open_both">3 przyciski - brama 1, brama 2, obie</option>
                     </select>
                 </div>
             </div>

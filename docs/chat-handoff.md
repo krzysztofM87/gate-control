@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po lokalnym podziale `server/app/main.py` na moduły. Ostatni deploy na VPS: commit `48c8375` (`Test deploy`).
+Ostatnia aktualizacja: 2026-07-21, po lokalnej zmianie formularza tworzenia pilota w panelu admina. Ostatni deploy na VPS: commit `3933a3c` (`Split FastAPI main into modules`).
 
 ## Krotki kontekst
 
@@ -106,6 +106,14 @@ Glowny przeplyw:
 9. Backend zapisuje ACK i logi zdarzen.
 
 Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
+
+Panel admina przy tworzeniu pilota wybiera urzadzenie z listy urzadzen z bazy. Aktywne urzadzenia sa wybieralne, wylaczone sa pokazane jako niedostepne. Typ pilota wybiera sie jako:
+
+```text
+1 przycisk - brama 1 / GPIO26
+1 przycisk - brama 2 / GPIO27
+3 przyciski - brama 1, brama 2, obie
+```
 
 ## Aktualne endpointy
 
