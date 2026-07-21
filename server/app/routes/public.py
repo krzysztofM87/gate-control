@@ -5,11 +5,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
-from app.config import ADMIN_TOKEN, DEVICE_ID, DEVICE_SECRET, PUBLIC_PATH_PREFIX
+from app.config import (
+    ADMIN_TOKEN,
+    COMMAND_PENDING_TIMEOUT_SECONDS,
+    DEVICE_ID,
+    DEVICE_SECRET,
+    PUBLIC_PATH_PREFIX,
+)
 from app.database import get_db
 from app.models import AccessToken, Command, CommandLog
 from app.services import (
     create_command_from_token,
+    expire_pending_command,
+    expire_pending_commands,
     gate_label,
     now_iso,
     public_path,
@@ -147,6 +155,9 @@ def open_gate(
 
 @router.get("/debug/state")
 def debug_state(db: Session = Depends(get_db)):
+    if expire_pending_commands(db):
+        db.commit()
+
     pending_count = db.query(Command).filter(Command.status == "pending").count()
     sent_count = db.query(Command).filter(Command.status == "sent").count()
     done_count = db.query(Command).filter(Command.status == "done").count()
@@ -225,6 +236,10 @@ def client_pilot_page(
 
     max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
     title = display_pilot_title(token)
+    status_poll_attempts = max(
+        20,
+        ((COMMAND_PENDING_TIMEOUT_SECONDS * 1000 + 699) // 700) + 3,
+    )
 
     body = f"""
 <!doctype html>
@@ -476,7 +491,7 @@ def client_pilot_page(
         }}
 
         async function watchCommandStatus(statusUrl) {{
-            const maxAttempts = 20;
+            const maxAttempts = {status_poll_attempts};
 
             for (let attempt = 0; attempt < maxAttempts; attempt++) {{
                 const data = await checkCommandStatus(statusUrl);
@@ -506,6 +521,12 @@ def client_pilot_page(
                     }}
 
                     scheduleReady();
+                    return;
+                }}
+
+                if (data.status === "failed") {{
+                    setStep(stepCreated, "done");
+                    setStatus("Nie wykonano polecenia. Sterownik nie odebrał go przed upływem czasu.", "err");
                     return;
                 }}
 
@@ -629,6 +650,10 @@ def client_pilot_command_status(
     if command is None:
         raise HTTPException(status_code=404, detail="Command not found")
 
+    if expire_pending_command(db, command):
+        db.commit()
+        db.refresh(command)
+
     return {
         "command_id": command.command_id,
         "command": command.command,
@@ -637,6 +662,7 @@ def client_pilot_command_status(
         "created_at": command.created_at.isoformat() if command.created_at else None,
         "sent_at": command.sent_at.isoformat() if command.sent_at else None,
         "ack_at": command.ack_at.isoformat() if command.ack_at else None,
+        "message": command.message,
         "used_count": token.used_count,
         "max_uses": token.max_uses,
         "valid_forever": getattr(token, "valid_forever", False),

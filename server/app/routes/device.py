@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Command
 from app.schemas import AckRequest
-from app.services import authenticate_device, log_event, now_iso, now_utc
+from app.services import (
+    authenticate_device,
+    expire_pending_commands,
+    log_event,
+    now_iso,
+    now_utc,
+)
 
 
 router = APIRouter()
@@ -27,6 +33,8 @@ def device_poll(
         x_device_secret=x_device_secret,
         x_device_token=x_device_token,
     )
+
+    expire_pending_commands(db, device_id=device.device_id)
 
     command = (
         db.query(Command)

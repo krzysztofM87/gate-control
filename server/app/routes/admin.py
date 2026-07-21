@@ -12,6 +12,7 @@ from app.schemas import CreateDeviceRequest, CreateTokenRequest
 from app.services import (
     check_admin_auth,
     device_counts,
+    expire_pending_commands,
     log_event,
     normalize_gate_target,
     now_utc,
@@ -167,6 +168,9 @@ def admin_list_commands(
     db: Session = Depends(get_db),
 ):
     check_admin_auth(x_admin_token)
+
+    if expire_pending_commands(db):
+        db.commit()
 
     commands = (
         db.query(Command)

@@ -18,6 +18,7 @@ from app.services import (
     check_admin_auth,
     device_counts,
     device_or_404,
+    expire_pending_commands,
     format_dt,
     log_event,
     normalize_gate_target,
@@ -43,6 +44,9 @@ def admin_panel(
 ):
     if not is_admin_panel_authorized(request):
         return admin_login_page()
+
+    if expire_pending_commands(db):
+        db.commit()
 
     tokens = (
         db.query(AccessToken)

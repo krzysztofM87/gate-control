@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po naprawie endpointu statusu komendy pilota. Ostatni deploy na VPS: `Fix pilot status endpoint`.
+Ostatnia aktualizacja: 2026-07-21, po wdrozeniu timeoutu dla oczekujacych komend. Ostatni deploy na VPS: `Expire stale pending commands`.
 
 Po podziale `main.py` naprawiono dwa bledy wykonania pilota: brak zwracania komendy z `create_command_from_token()` oraz brak importu `AccessToken` w endpointcie sprawdzajacym status komendy. Frontend pilota obsluguje tez odpowiedzi serwera, ktore nie sa JSON-em, i pokazuje wtedy czytelny blad HTTP.
 
@@ -106,6 +106,10 @@ Glowny przeplyw:
 7. ESP32 zwiera odpowiednie wyjscie GPIO przez zadany czas.
 8. ESP32 potwierdza `/api/device/ack`.
 9. Backend zapisuje ACK i logi zdarzen.
+
+Komenda moze pozostac `pending` maksymalnie przez `COMMAND_PENDING_TIMEOUT_SECONDS` (domyslnie 15 sekund). Po tym czasie backend zmienia jej status na `failed` przed kolejnym odczytem statusu lub pollingiem urzadzenia. Wygasla komenda nie jest zwracana do ESP32. Stare komendy sa tez wygaszane przy starcie aplikacji oraz podczas odczytu panelu/listy komend.
+
+Test regresyjny timeoutu znajduje sie w `server/tests/test_command_timeout.py` i uruchamia sie poleceniem `python -m unittest discover -s tests` z katalogu `server` lub `/app` w kontenerze.
 
 Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
 
@@ -301,6 +305,7 @@ DEVICE_TOKEN=sekret_tylko_na_vps
 DEVICE_SECRET=opcjonalnie_alias_dla_DEVICE_TOKEN
 ADMIN_TOKEN=sekret_admina_tylko_na_vps
 COMMAND_RELAY_TIME_MS=700
+COMMAND_PENDING_TIMEOUT_SECONDS=15
 TOKEN_DEFAULT_VALID_HOURS=72
 OPEN_COOLDOWN_SECONDS=5
 APP_TIMEZONE=Europe/Warsaw

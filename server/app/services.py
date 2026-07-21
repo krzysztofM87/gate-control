@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -11,6 +11,7 @@ from app.config import (
     ADMIN_TOKEN,
     APP_TIMEZONE,
     BASE_URL,
+    COMMAND_PENDING_TIMEOUT_SECONDS,
     COMMAND_RELAY_TIME_MS,
     DEVICE_ID,
     DEVICE_SECRET,
@@ -126,6 +127,61 @@ def log_event(
     )
 
     db.add(entry)
+
+
+def expire_pending_command(
+    db: Session,
+    command: Command,
+    *,
+    current_time: Optional[datetime] = None,
+) -> bool:
+    if command.status != "pending":
+        return False
+
+    current_time = current_time or now_utc()
+    deadline = command.created_at + timedelta(seconds=COMMAND_PENDING_TIMEOUT_SECONDS)
+
+    if current_time < deadline:
+        return False
+
+    command.status = "failed"
+    command.message = (
+        f"Command expired after {COMMAND_PENDING_TIMEOUT_SECONDS} seconds before delivery"
+    )
+
+    log_event(
+        db,
+        event_type="command_timeout",
+        status="failed",
+        command=command,
+        message=command.message,
+    )
+
+    return True
+
+
+def expire_pending_commands(
+    db: Session,
+    *,
+    device_id: Optional[str] = None,
+) -> int:
+    current_time = now_utc()
+    cutoff = current_time - timedelta(seconds=COMMAND_PENDING_TIMEOUT_SECONDS)
+    query = (
+        db.query(Command)
+        .filter(Command.status == "pending")
+        .filter(Command.created_at <= cutoff)
+    )
+
+    if device_id is not None:
+        query = query.filter(Command.device_id == device_id)
+
+    commands = query.all()
+
+    for command in commands:
+        expire_pending_command(db, command, current_time=current_time)
+
+    return len(commands)
 
 
 def check_admin_auth(x_admin_token: Optional[str]) -> None:
