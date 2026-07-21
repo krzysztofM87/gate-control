@@ -144,13 +144,33 @@ def client_usage_values(
     return (usage.used_count if usage else 0, token.max_uses_per_client)
 
 
+def client_validity_values(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Request,
+) -> tuple[Optional[int], Optional[datetime], bool]:
+    validity_hours = token.client_validity_hours
+
+    if validity_hours is None:
+        return None, None, False
+
+    usage = get_client_usage(db, token=token, request=request)
+
+    if usage is None:
+        return validity_hours, None, False
+
+    valid_until = usage.created_at + timedelta(hours=validity_hours)
+    return validity_hours, valid_until, now_utc() >= valid_until
+
+
 def consume_client_usage(
     db: Session,
     *,
     token: AccessToken,
     request: Request,
 ) -> Optional[TokenClientUsage]:
-    if token.max_uses_per_client is None:
+    if token.max_uses_per_client is None and token.client_validity_hours is None:
         return None
 
     client_id = client_id_from_request(request)
@@ -184,16 +204,50 @@ def consume_client_usage(
         .on_conflict_do_nothing(index_elements=["token_id", "client_key"])
     )
 
-    result = db.execute(
+    usage = (
+        db.query(TokenClientUsage)
+        .filter(TokenClientUsage.token_id == token.id)
+        .filter(TokenClientUsage.client_key == usage_key)
+        .first()
+    )
+
+    if usage is None:
+        raise HTTPException(status_code=500, detail="Unable to register client device")
+
+    if token.client_validity_hours is not None:
+        valid_until = usage.created_at + timedelta(hours=token.client_validity_hours)
+
+        if current_time >= valid_until:
+            log_event(
+                db,
+                event_type="open_rejected",
+                request=request,
+                status="client_validity_expired",
+                token=token,
+                message="Per-client validity expired",
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=403,
+                detail="Ważność pilota na tym telefonie wygasła",
+            )
+
+    usage_update = (
         update(TokenClientUsage)
         .where(TokenClientUsage.token_id == token.id)
         .where(TokenClientUsage.client_key == usage_key)
-        .where(TokenClientUsage.used_count < token.max_uses_per_client)
         .values(
             used_count=TokenClientUsage.used_count + 1,
             last_used_at=current_time,
         )
     )
+
+    if token.max_uses_per_client is not None:
+        usage_update = usage_update.where(
+            TokenClientUsage.used_count < token.max_uses_per_client
+        )
+
+    result = db.execute(usage_update)
 
     if result.rowcount != 1:
         log_event(
@@ -607,6 +661,7 @@ def update_access_token(
         "valid_forever",
         "max_uses",
         "max_uses_per_client",
+        "client_validity_hours",
         "open_cooldown_seconds",
         "is_active",
     }
@@ -701,6 +756,7 @@ def run_schema_migrations() -> None:
             "button_both_label": "ALTER TABLE access_tokens ADD COLUMN button_both_label VARCHAR(120)",
             "valid_forever": "ALTER TABLE access_tokens ADD COLUMN valid_forever BOOLEAN DEFAULT 0",
             "max_uses_per_client": "ALTER TABLE access_tokens ADD COLUMN max_uses_per_client INTEGER",
+            "client_validity_hours": "ALTER TABLE access_tokens ADD COLUMN client_validity_hours INTEGER",
         }
 
         for name, sql in migrations.items():

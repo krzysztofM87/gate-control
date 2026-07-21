@@ -31,6 +31,9 @@ class CreateTokenRequest(BaseModel):
     # null = bez limitu dla pojedynczego telefonu
     max_uses_per_client: Optional[int] = Field(default=None, ge=1, le=1000)
 
+    # null = bez dodatkowej waznosci dla pojedynczego telefonu
+    client_validity_hours: Optional[int] = Field(default=None, ge=1, le=24 * 60)
+
     open_cooldown_seconds: int = Field(default=OPEN_COOLDOWN_SECONDS, ge=0, le=3600)
 
 
@@ -45,6 +48,7 @@ class UpdateTokenRequest(BaseModel):
     valid_hours: Optional[int] = Field(default=None, ge=1, le=24 * 60)
     max_uses: Optional[int] = Field(default=None, ge=1, le=1000)
     max_uses_per_client: Optional[int] = Field(default=None, ge=1, le=1000)
+    client_validity_hours: Optional[int] = Field(default=None, ge=1, le=24 * 60)
     open_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     is_active: Optional[bool] = None
 

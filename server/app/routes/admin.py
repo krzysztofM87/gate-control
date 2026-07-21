@@ -95,6 +95,7 @@ def admin_create_token(
         valid_forever=valid_forever,
         max_uses=payload.max_uses,
         max_uses_per_client=payload.max_uses_per_client,
+        client_validity_hours=payload.client_validity_hours,
         used_count=0,
         open_cooldown_seconds=payload.open_cooldown_seconds,
     )
@@ -125,6 +126,7 @@ def admin_create_token(
         "valid_forever": getattr(token, "valid_forever", False),
         "max_uses": token.max_uses,
         "max_uses_per_client": token.max_uses_per_client,
+        "client_validity_hours": token.client_validity_hours,
         "valid_forever": getattr(token, "valid_forever", False),
     }
 
@@ -160,6 +162,7 @@ def admin_list_tokens(
                 "used_count": token.used_count,
                 "max_uses": token.max_uses,
                 "max_uses_per_client": token.max_uses_per_client,
+                "client_validity_hours": token.client_validity_hours,
         "valid_forever": getattr(token, "valid_forever", False),
             }
             for token in tokens
@@ -256,6 +259,7 @@ def admin_update_token(
         "used_count": token.used_count,
         "max_uses": token.max_uses,
         "max_uses_per_client": token.max_uses_per_client,
+        "client_validity_hours": token.client_validity_hours,
         "open_cooldown_seconds": token.open_cooldown_seconds,
     }
 

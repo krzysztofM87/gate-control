@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po wdrozeniu edycji pilotow/tokenow. Ostatni deploy na VPS: `Add pilot token editing`.
+Ostatnia aktualizacja: 2026-07-21, po wdrozeniu waznosci pilota osobno na telefon. Ostatni deploy na VPS: `Add per-phone pilot validity`.
 
 Po podziale `main.py` naprawiono dwa bledy wykonania pilota: brak zwracania komendy z `create_command_from_token()` oraz brak importu `AccessToken` w endpointcie sprawdzajacym status komendy. Frontend pilota obsluguje tez odpowiedzi serwera, ktore nie sa JSON-em, i pokazuje wtedy czytelny blad HTTP.
 
@@ -110,11 +110,11 @@ Glowny przeplyw:
 
 Komenda moze pozostac `pending` maksymalnie przez `COMMAND_PENDING_TIMEOUT_SECONDS` (domyslnie 15 sekund). Po tym czasie backend zmienia jej status na `failed` przed kolejnym odczytem statusu lub pollingiem urzadzenia. Wygasla komenda nie jest zwracana do ESP32. Stare komendy sa tez wygaszane przy starcie aplikacji oraz podczas odczytu panelu/listy komend.
 
-Testy regresyjne timeoutu, limitu na telefon, usuwania i edycji tokenu znajduja sie w `server/tests/`. Uruchamia sie je poleceniem `python -m unittest discover -s tests` z katalogu `server` lub `/app` w kontenerze.
+Testy regresyjne timeoutu, limitu uzyc i waznosci na telefon oraz usuwania i edycji tokenu znajduja sie w `server/tests/`. Uruchamia sie je poleceniem `python -m unittest discover -s tests` z katalogu `server` lub `/app` w kontenerze.
 
 Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
 
-Pilot moze miec opcjonalny `max_uses_per_client`. Przegladarka dostaje roczne cookie `gate_control_client_id`, a tabela `token_client_usages` przechowuje osobny licznik dla pary pilot + telefon. W bazie zapisywany jest SHA-256 identyfikatora cookie, nie jego surowa wartosc. Limit jest sprawdzany we wspolnej funkcji tworzenia komendy, wiec obowiazuje strony `/pilot` i `/brama`.
+Pilot moze miec opcjonalne `max_uses_per_client` i `client_validity_hours`. Przegladarka dostaje roczne cookie `gate_control_client_id`, a tabela `token_client_usages` przechowuje osobny licznik i czas pierwszego zaakceptowanego uzycia dla pary pilot + telefon. W bazie zapisywany jest SHA-256 identyfikatora cookie, nie jego surowa wartosc. Okno waznosci kazdego telefonu zaczyna sie przy jego pierwszym zaakceptowanym otwarciu. Po wygasnieciu backend zwraca `403` przed utworzeniem komendy; inne telefony nadal moga uzywac pilota. Oba ograniczenia obowiazuja strony `/pilot` i `/brama`.
 
 Pojedynczy pilot mozna usunac z tabeli tokenow w panelu albo przez `DELETE /admin/tokens/{token_id}`. Operacja usuwa token i jego liczniki telefonow, anuluje komendy `pending`/`sent`, ale zachowuje wykonane komendy i logi.
 
@@ -424,7 +424,7 @@ $env:GATE_DEVICE_SECRET = "..."
 
 - `/debug/state` jest publiczne.
 - Panel admina i Admin API pokazuja pelne tokeny oraz sekrety urzadzen.
-- Pokrycie automatycznymi testami jest ograniczone do timeoutu komend, limitu uzyc na telefon oraz usuwania i edycji tokenu.
+- Pokrycie automatycznymi testami jest ograniczone do timeoutu komend, limitu uzyc i waznosci na telefon oraz usuwania i edycji tokenu.
 - Brak Alembica; migracje sa proste i reczne w `run_schema_migrations()`.
 - W odpowiedziach JSON sa drobne powtorzenia klucza `valid_forever`.
 - Firmware nie obsluguje HTTPS.

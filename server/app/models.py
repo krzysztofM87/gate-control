@@ -49,6 +49,7 @@ class AccessToken(Base):
 
     max_uses = Column(Integer, nullable=True)
     max_uses_per_client = Column(Integer, nullable=True)
+    client_validity_hours = Column(Integer, nullable=True)
     used_count = Column(Integer, default=0, nullable=False)
     open_cooldown_seconds = Column(Integer, default=5, nullable=False)
 

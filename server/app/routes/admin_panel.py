@@ -76,6 +76,23 @@ def parse_optional_limit(value: str) -> int | None:
 
     return parsed
 
+
+def parse_optional_hours(value: str) -> int | None:
+    value = value.strip()
+
+    if not value:
+        return None
+
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid validity value") from error
+
+    if not 1 <= parsed <= 24 * 60:
+        raise HTTPException(status_code=400, detail="Validity must be between 1 and 1440 hours")
+
+    return parsed
+
 @router.get("/admin-panel", response_class=HTMLResponse)
 def admin_panel(
     request: Request,
@@ -111,6 +128,16 @@ def admin_panel(
 
     for token in tokens:
         url = public_url(f"/pilot/{token.token_value}")
+        client_use_limit_text = (
+            str(token.max_uses_per_client)
+            if token.max_uses_per_client is not None
+            else "bez limitu użyć"
+        )
+        client_validity_text = (
+            f"{token.client_validity_hours} h"
+            if token.client_validity_hours is not None
+            else "bez terminu"
+        )
         token_rows += f"""
         <tr>
             <td>{token.id}</td>
@@ -119,7 +146,7 @@ def admin_panel(
             <td><code>{html.escape(token.gate_target)}</code></td>
             <td>{html.escape(token.status)}</td>
             <td>{token.used_count} / {token.max_uses if token.max_uses is not None else "∞"}</td>
-            <td>{token.max_uses_per_client if token.max_uses_per_client is not None else "∞"}</td>
+            <td>{html.escape(client_use_limit_text)} / {html.escape(client_validity_text)}</td>
             <td>{html.escape(token_valid_to_text(token))}</td>
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
             <td>
@@ -262,8 +289,16 @@ def admin_panel(
                 </div>
             </div>
 
-            <label>Limit użyć na każdy telefon, puste = bez limitu</label>
-            <input name="max_uses_per_client" type="number" min="1" max="1000" placeholder="np. 2">
+            <div class="grid">
+                <div>
+                    <label>Limit użyć na każdy telefon, puste = bez limitu</label>
+                    <input name="max_uses_per_client" type="number" min="1" max="1000" placeholder="np. 2">
+                </div>
+                <div>
+                    <label>Ważność na telefon w godzinach, puste = bez limitu</label>
+                    <input name="client_validity_hours" type="number" min="1" max="1440" placeholder="np. 24">
+                </div>
+            </div>
 
             <label>Cooldown w sekundach</label>
             <input name="open_cooldown_seconds" type="number" value="{OPEN_COOLDOWN_SECONDS}" min="0" max="3600">
@@ -283,7 +318,7 @@ def admin_panel(
                     <th>Cel</th>
                     <th>Status</th>
                     <th>Użycia</th>
-                    <th>Limit / telefon</th>
+                    <th>Ograniczenia telefonu</th>
                     <th>Ważny do</th>
                     <th>Link</th>
                     <th>Akcje</th>
@@ -425,6 +460,10 @@ async def admin_panel_create_token(
         if max_uses_per_client is not None:
             max_uses_per_client = max(1, min(max_uses_per_client, 1000))
 
+    client_validity_hours = parse_optional_hours(
+        str(form.get("client_validity_hours") or "")
+    )
+
     try:
         cooldown = int(form.get("open_cooldown_seconds") or OPEN_COOLDOWN_SECONDS)
     except ValueError:
@@ -456,6 +495,7 @@ async def admin_panel_create_token(
         valid_forever=valid_forever,
         max_uses=max_uses,
         max_uses_per_client=max_uses_per_client,
+        client_validity_hours=client_validity_hours,
         used_count=0,
         open_cooldown_seconds=cooldown,
     )
@@ -535,6 +575,9 @@ def admin_panel_edit_token(
     max_uses_per_client_value = (
         "" if token.max_uses_per_client is None else str(token.max_uses_per_client)
     )
+    client_validity_hours_value = (
+        "" if token.client_validity_hours is None else str(token.client_validity_hours)
+    )
 
     body = f"""
     <div class="card">
@@ -602,10 +645,13 @@ def admin_panel_edit_token(
                     <input name="max_uses_per_client" type="number" min="1" max="1000" value="{max_uses_per_client_value}">
                 </div>
                 <div>
-                    <label>Cooldown w sekundach</label>
-                    <input name="open_cooldown_seconds" type="number" min="0" max="3600" value="{token.open_cooldown_seconds}">
+                    <label>Ważność na telefon w godzinach, puste = bez limitu</label>
+                    <input name="client_validity_hours" type="number" min="1" max="1440" value="{client_validity_hours_value}">
                 </div>
             </div>
+
+            <label>Cooldown w sekundach</label>
+            <input name="open_cooldown_seconds" type="number" min="0" max="3600" value="{token.open_cooldown_seconds}">
 
             <label><input name="is_active" type="checkbox" value="1" style="width:auto"{active_checked}> Pilot aktywny</label>
             <button type="submit">Zapisz zmiany</button>
@@ -662,6 +708,9 @@ async def admin_panel_update_token(
         "max_uses": parse_optional_limit(str(form.get("max_uses") or "")),
         "max_uses_per_client": parse_optional_limit(
             str(form.get("max_uses_per_client") or "")
+        ),
+        "client_validity_hours": parse_optional_hours(
+            str(form.get("client_validity_hours") or "")
         ),
         "open_cooldown_seconds": cooldown,
         "is_active": bool(form.get("is_active")),

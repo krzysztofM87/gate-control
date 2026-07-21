@@ -16,10 +16,12 @@ from app.database import get_db
 from app.models import AccessToken, Command, CommandLog
 from app.services import (
     client_usage_values,
+    client_validity_values,
     create_command_from_token,
     ensure_client_id,
     expire_pending_command,
     expire_pending_commands,
+    format_dt,
     gate_label,
     now_iso,
     public_path,
@@ -35,6 +37,19 @@ from app.views import (
 
 
 router = APIRouter()
+
+
+def client_validity_text(
+    validity_hours: Optional[int],
+    valid_until,
+) -> str:
+    if validity_hours is None:
+        return "bez dodatkowego limitu"
+
+    if valid_until is None:
+        return f"{validity_hours} h od pierwszego użycia"
+
+    return format_dt(valid_until)
 
 @router.get("/health")
 def health():
@@ -77,6 +92,15 @@ def gate_page(
     client_limit_reached = (
         client_max_uses is not None and client_used_count >= client_max_uses
     )
+    client_validity_hours, client_valid_until, client_validity_expired = (
+        client_validity_values(db, token=token, request=request)
+    )
+    client_blocked = client_limit_reached or client_validity_expired
+    client_block_message = (
+        "Ważność pilota na tym telefonie wygasła."
+        if client_validity_expired
+        else "Limit użyć na tym telefonie został wykorzystany."
+    )
 
     buttons = ""
 
@@ -99,7 +123,7 @@ def gate_page(
 
         class_attr = f' class="{css_class}"' if css_class else ""
 
-        disabled_attr = " disabled" if client_limit_reached else ""
+        disabled_attr = " disabled" if client_blocked else ""
 
         buttons += f"""
         <form method="post" action="{html.escape(action)}">
@@ -110,12 +134,13 @@ def gate_page(
     body = f"""
         <h1>Otwieranie bramy</h1>
         <p>Naciśnij przycisk, aby wysłać polecenie otwarcia.</p>
-        {"<p>Limit użyć na tym telefonie został wykorzystany.</p>" if client_limit_reached else ""}
+        {f"<p>{html.escape(client_block_message)}</p>" if client_blocked else ""}
         {buttons}
         <div class="small">
             Ważny do: {html.escape(token_valid_to_text(token))}<br>
             Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}<br>
-            Ten telefon: {client_used_count} / {client_max_uses if client_max_uses is not None else "bez limitu"}
+            Ten telefon: {client_used_count} / {client_max_uses if client_max_uses is not None else "bez limitu"}<br>
+            Ważność na tym telefonie: {html.escape(client_validity_text(client_validity_hours, client_valid_until))}
         </div>
     """
 
@@ -237,6 +262,15 @@ def client_pilot_page(
     client_limit_reached = (
         client_max_uses is not None and client_used_count >= client_max_uses
     )
+    client_validity_hours, client_valid_until, client_validity_expired = (
+        client_validity_values(db, token=token, request=request)
+    )
+    client_blocked = client_limit_reached or client_validity_expired
+    client_block_message = (
+        "Ważność pilota na tym telefonie wygasła."
+        if client_validity_expired
+        else "Limit użyć na tym telefonie został wykorzystany."
+    )
 
     if token.gate_target == "open_both":
         buttons = [
@@ -266,6 +300,10 @@ def client_pilot_page(
 
     max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
     client_max_uses_text = client_max_uses if client_max_uses is not None else "bez limitu"
+    client_validity_display = client_validity_text(
+        client_validity_hours,
+        client_valid_until,
+    )
     title = display_pilot_title(token)
     status_poll_attempts = max(
         20,
@@ -432,7 +470,8 @@ def client_pilot_page(
         <div class="footer">
             Ważny do: {html.escape(token_valid_to_text(token))}<br>
             Użycia łącznie: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span><br>
-            Ten telefon: <span id="client-usage-count">{client_used_count}</span> / <span id="client-usage-max">{html.escape(str(client_max_uses_text))}</span>
+            Ten telefon: <span id="client-usage-count">{client_used_count}</span> / <span id="client-usage-max">{html.escape(str(client_max_uses_text))}</span><br>
+            Ważność na tym telefonie: <span id="client-validity">{html.escape(client_validity_display)}</span>
         </div>
     </main>
 
@@ -447,9 +486,10 @@ def client_pilot_page(
         const usageMaxEl = document.getElementById("usage-max");
         const clientUsageCountEl = document.getElementById("client-usage-count");
         const clientUsageMaxEl = document.getElementById("client-usage-max");
+        const clientValidityEl = document.getElementById("client-validity");
 
         let readyTimer = null;
-        let clientLimitReached = {"true" if client_limit_reached else "false"};
+        let clientAccessBlocked = {"true" if client_blocked else "false"};
 
         function setStatus(text, mode) {{
             statusEl.textContent = text;
@@ -480,7 +520,7 @@ def client_pilot_page(
         }}
 
         function setBusy(isBusy) {{
-            buttons.forEach(button => button.disabled = isBusy || clientLimitReached);
+            buttons.forEach(button => button.disabled = isBusy || clientAccessBlocked);
             ledEl.classList.toggle("on", isBusy);
         }}
 
@@ -503,11 +543,17 @@ def client_pilot_page(
                 clientUsageMaxEl.textContent = data.client_max_uses === null ? "bez limitu" : data.client_max_uses;
             }}
 
+            if (typeof data.client_validity_text === "string") {{
+                clientValidityEl.textContent = data.client_validity_text;
+            }}
+
             const clientUsedCount = Number(clientUsageCountEl.textContent);
             const clientMaxUses = data.client_max_uses;
-            clientLimitReached = clientMaxUses !== null
+            const clientLimitReached = clientMaxUses !== null
                 && typeof clientMaxUses !== "undefined"
                 && clientUsedCount >= Number(clientMaxUses);
+            const clientValidityExpired = data.client_validity_expired === true;
+            clientAccessBlocked = clientLimitReached || clientValidityExpired;
         }}
 
         async function readJsonResponse(response) {{
@@ -607,6 +653,14 @@ def client_pilot_page(
 
                 if (!response.ok) {{
                     const message = data && data.detail ? data.detail : "Błąd HTTP " + response.status;
+
+                    if (response.status === 403 && (
+                        message.includes("na tym telefonie")
+                        || message.includes("tym telefonie")
+                    )) {{
+                        clientAccessBlocked = true;
+                    }}
+
                     setStatus(message, "err");
                     return;
                 }}
@@ -640,8 +694,8 @@ def client_pilot_page(
             }});
         }});
 
-        if (clientLimitReached) {{
-            setStatus("Limit użyć na tym telefonie został wykorzystany.", "err");
+        if (clientAccessBlocked) {{
+            setStatus("{client_block_message}", "err");
             setBusy(false);
         }}
     </script>
@@ -679,6 +733,9 @@ def client_pilot_press(
         token=token,
         request=request,
     )
+    client_validity_hours, client_valid_until, client_validity_expired = (
+        client_validity_values(db, token=token, request=request)
+    )
 
     return {
         "status": "ok",
@@ -690,6 +747,10 @@ def client_pilot_press(
         "max_uses": token.max_uses,
         "client_used_count": client_used_count,
         "client_max_uses": client_max_uses,
+        "client_validity_hours": client_validity_hours,
+        "client_valid_until": client_valid_until.isoformat() if client_valid_until else None,
+        "client_validity_text": client_validity_text(client_validity_hours, client_valid_until),
+        "client_validity_expired": client_validity_expired,
         "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
@@ -726,6 +787,9 @@ def client_pilot_command_status(
         token=token,
         request=request,
     )
+    client_validity_hours, client_valid_until, client_validity_expired = (
+        client_validity_values(db, token=token, request=request)
+    )
 
     return {
         "command_id": command.command_id,
@@ -740,6 +804,10 @@ def client_pilot_command_status(
         "max_uses": token.max_uses,
         "client_used_count": client_used_count,
         "client_max_uses": client_max_uses,
+        "client_validity_hours": client_validity_hours,
+        "client_valid_until": client_valid_until.isoformat() if client_valid_until else None,
+        "client_validity_text": client_validity_text(client_validity_hours, client_valid_until),
+        "client_validity_expired": client_validity_expired,
         "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
