@@ -269,6 +269,16 @@ def admin_panel_page(title: str, body: str) -> str:
             margin-top: 0;
             font-size: 13px;
         }}
+        .action-link {{
+            display: inline-block;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: #333;
+            color: #fff;
+            text-decoration: none;
+            font-size: 13px;
+            margin-right: 6px;
+        }}
         .grid {{
             display: grid;
             grid-template-columns: 1fr 1fr;

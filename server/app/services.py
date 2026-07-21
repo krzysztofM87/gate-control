@@ -588,6 +588,107 @@ def delete_access_token(
     }
 
 
+def update_access_token(
+    db: Session,
+    *,
+    token: AccessToken,
+    changes: dict,
+    request: Optional[Request] = None,
+) -> dict:
+    editable_fields = {
+        "label",
+        "pilot_title",
+        "button_1_label",
+        "button_2_label",
+        "button_both_label",
+        "device_id",
+        "gate_target",
+        "valid_to",
+        "valid_forever",
+        "max_uses",
+        "max_uses_per_client",
+        "open_cooldown_seconds",
+        "is_active",
+    }
+    unknown_fields = set(changes) - editable_fields
+
+    if unknown_fields:
+        raise HTTPException(status_code=400, detail="Unsupported token fields")
+
+    original_device_id = token.device_id
+    original_gate_target = token.gate_target
+
+    if "device_id" in changes:
+        device = db.query(Device).filter(Device.device_id == changes["device_id"]).first()
+
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        if not device.is_active and device.device_id != token.device_id:
+            raise HTTPException(status_code=400, detail="Device is inactive")
+
+        changes["device_id"] = device.device_id
+
+    if "gate_target" in changes:
+        changes["gate_target"] = normalize_gate_target(changes["gate_target"])
+
+    for field, value in changes.items():
+        setattr(token, field, value)
+
+    current_time = now_utc()
+
+    if not token.is_active:
+        token.status = "inactive"
+    elif not token.valid_forever and token.valid_to < current_time:
+        token.status = "expired"
+    elif token.max_uses is not None and token.used_count >= token.max_uses:
+        token.status = "used"
+    else:
+        token.status = "active"
+
+    routing_changed = (
+        token.device_id != original_device_id
+        or token.gate_target != original_gate_target
+    )
+    cancelled_commands = 0
+
+    if routing_changed or token.status != "active":
+        cancelled_commands = (
+            db.query(Command)
+            .filter(Command.token_id == token.id)
+            .filter(Command.status.in_(["pending", "sent"]))
+            .update(
+                {
+                    Command.status: "cancelled",
+                    Command.message: "Cancelled because access token was updated",
+                },
+                synchronize_session=False,
+            )
+        )
+
+    log_event(
+        db,
+        event_type="token_updated",
+        request=request,
+        status=token.status,
+        token=token,
+        message=(
+            f"Token updated fields={','.join(sorted(changes))}; "
+            f"cancelled_commands={cancelled_commands}"
+        ),
+    )
+
+    db.commit()
+    db.refresh(token)
+
+    return {
+        "token_id": token.id,
+        "status": token.status,
+        "cancelled_commands": cancelled_commands,
+        "updated_fields": sorted(changes),
+    }
+
+
 def run_schema_migrations() -> None:
     with engine.begin() as conn:
         rows = conn.execute(text("PRAGMA table_info(access_tokens)")).mappings().all()

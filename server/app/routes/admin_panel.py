@@ -1,12 +1,13 @@
 import html
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.config import (
+    APP_TIMEZONE,
     DEVICE_ID,
     FOREVER_VALID_TO,
     OPEN_COOLDOWN_SECONDS,
@@ -26,6 +27,7 @@ from app.services import (
     now_utc,
     public_path,
     public_url,
+    update_access_token,
 )
 from app.views import (
     admin_login_page,
@@ -37,6 +39,42 @@ from app.views import (
 
 
 router = APIRouter()
+
+
+def datetime_local_value(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(APP_TIMEZONE).strftime("%Y-%m-%dT%H:%M")
+
+
+def parse_datetime_local(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid valid_to value") from error
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=APP_TIMEZONE)
+
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def parse_optional_limit(value: str) -> int | None:
+    value = value.strip()
+
+    if not value:
+        return None
+
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid limit value") from error
+
+    if not 1 <= parsed <= 1000:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+
+    return parsed
 
 @router.get("/admin-panel", response_class=HTMLResponse)
 def admin_panel(
@@ -85,6 +123,7 @@ def admin_panel(
             <td>{html.escape(token_valid_to_text(token))}</td>
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
             <td>
+                <a class="action-link" href="{public_path(f'/admin-panel/tokens/{token.id}/edit')}">Edytuj</a>
                 <form class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/delete')}" onsubmit="return confirm('Usunąć ten pilot?')">
                     <button class="danger compact" type="submit">Usuń</button>
                 </form>
@@ -450,6 +489,201 @@ async def admin_panel_create_token(
     """
 
     return HTMLResponse(admin_panel_page("Utworzono pilota", body))
+
+
+@router.get("/admin-panel/tokens/{token_id}/edit", response_class=HTMLResponse)
+def admin_panel_edit_token(
+    token_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    devices = db.query(Device).order_by(Device.name.asc(), Device.device_id.asc()).all()
+    device_options = ""
+
+    for device in devices:
+        selected = " selected" if device.device_id == token.device_id else ""
+        disabled = " disabled" if not device.is_active and not selected else ""
+        status_text = "" if device.is_active else " (wyłączone)"
+        name_text = f"{device.name} - " if device.name else ""
+        option_label = f"{name_text}{device.device_id}{status_text}"
+        device_options += (
+            f'<option value="{html.escape(device.device_id)}"{selected}{disabled}>'
+            f"{html.escape(option_label)}</option>"
+        )
+
+    gate_options = ""
+    for value, label in (
+        ("open_1", "1 przycisk - brama 1 / GPIO26"),
+        ("open_2", "1 przycisk - brama 2 / GPIO27"),
+        ("open_both", "3 przyciski - brama 1, brama 2, obie"),
+    ):
+        selected = " selected" if value == token.gate_target else ""
+        gate_options += f'<option value="{value}"{selected}>{label}</option>'
+
+    valid_forever_checked = " checked" if token.valid_forever else ""
+    active_checked = " checked" if token.is_active else ""
+    valid_to_value = "" if token.valid_forever else datetime_local_value(token.valid_to)
+    max_uses_value = "" if token.max_uses is None else str(token.max_uses)
+    max_uses_per_client_value = (
+        "" if token.max_uses_per_client is None else str(token.max_uses_per_client)
+    )
+
+    body = f"""
+    <div class="card">
+        <div class="top">
+            <h1>Edytuj pilota</h1>
+            <a href="{public_path('/admin-panel')}">Wróć</a>
+        </div>
+
+        <p class="muted">Link pilota pozostaje bez zmian.</p>
+        <p><code>{html.escape(public_url(f'/pilot/{token.token_value}'))}</code></p>
+
+        <form method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/update')}">
+            <div class="grid">
+                <div>
+                    <label>Opis techniczny</label>
+                    <input name="label" value="{html.escape(token.label or '')}">
+                </div>
+                <div>
+                    <label>Nazwa pilota</label>
+                    <input name="pilot_title" value="{html.escape(token.pilot_title or '')}">
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Urządzenie</label>
+                    <select name="device_id" required>{device_options}</select>
+                </div>
+                <div>
+                    <label>Typ pilota</label>
+                    <select name="gate_target" required>{gate_options}</select>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Nazwa przycisku 1</label>
+                    <input name="button_1_label" value="{html.escape(token.button_1_label or '')}">
+                </div>
+                <div>
+                    <label>Nazwa przycisku 2</label>
+                    <input name="button_2_label" value="{html.escape(token.button_2_label or '')}">
+                </div>
+            </div>
+
+            <label>Nazwa przycisku „obie”</label>
+            <input name="button_both_label" value="{html.escape(token.button_both_label or '')}">
+
+            <div class="grid">
+                <div>
+                    <label>Ważny do</label>
+                    <input name="valid_to" type="datetime-local" value="{valid_to_value}">
+                    <label><input name="valid_forever" type="checkbox" value="1" style="width:auto"{valid_forever_checked}> Bezterminowy</label>
+                </div>
+                <div>
+                    <label>Łączny limit użyć, puste = bez limitu</label>
+                    <input name="max_uses" type="number" min="1" max="1000" value="{max_uses_value}">
+                    <p class="muted">Dotychczasowe użycia: {token.used_count}</p>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Limit użyć na każdy telefon, puste = bez limitu</label>
+                    <input name="max_uses_per_client" type="number" min="1" max="1000" value="{max_uses_per_client_value}">
+                </div>
+                <div>
+                    <label>Cooldown w sekundach</label>
+                    <input name="open_cooldown_seconds" type="number" min="0" max="3600" value="{token.open_cooldown_seconds}">
+                </div>
+            </div>
+
+            <label><input name="is_active" type="checkbox" value="1" style="width:auto"{active_checked}> Pilot aktywny</label>
+            <button type="submit">Zapisz zmiany</button>
+        </form>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Edytuj pilota", body))
+
+
+@router.post("/admin-panel/tokens/{token_id}/update", response_class=HTMLResponse)
+async def admin_panel_update_token(
+    token_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    form = await request.form()
+    valid_forever = bool(form.get("valid_forever"))
+    valid_to_raw = str(form.get("valid_to") or "").strip()
+
+    if valid_forever:
+        valid_to = FOREVER_VALID_TO
+    elif valid_to_raw:
+        valid_to = parse_datetime_local(valid_to_raw)
+    else:
+        raise HTTPException(status_code=400, detail="valid_to is required")
+
+    try:
+        cooldown = int(form.get("open_cooldown_seconds") or 0)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid cooldown value") from error
+
+    if not 0 <= cooldown <= 3600:
+        raise HTTPException(status_code=400, detail="Cooldown must be between 0 and 3600")
+
+    changes = {
+        "label": str(form.get("label") or ""),
+        "pilot_title": str(form.get("pilot_title") or ""),
+        "button_1_label": str(form.get("button_1_label") or ""),
+        "button_2_label": str(form.get("button_2_label") or ""),
+        "button_both_label": str(form.get("button_both_label") or ""),
+        "device_id": str(form.get("device_id") or ""),
+        "gate_target": str(form.get("gate_target") or ""),
+        "valid_to": valid_to,
+        "valid_forever": valid_forever,
+        "max_uses": parse_optional_limit(str(form.get("max_uses") or "")),
+        "max_uses_per_client": parse_optional_limit(
+            str(form.get("max_uses_per_client") or "")
+        ),
+        "open_cooldown_seconds": cooldown,
+        "is_active": bool(form.get("is_active")),
+    }
+    result = update_access_token(
+        db,
+        token=token,
+        changes=changes,
+        request=request,
+    )
+
+    body = f"""
+    <div class="card">
+        <h1>Zapisano zmiany</h1>
+        <p><strong>{html.escape(display_pilot_title(token))}</strong></p>
+        <p>Status: <code>{html.escape(token.status)}</code></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{result['cancelled_commands']}</strong></p>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Zapisano pilota", body))
 
 
 @router.post("/admin-panel/tokens/{token_id}/delete", response_class=HTMLResponse)

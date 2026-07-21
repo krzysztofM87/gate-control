@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import DEVICE_ID, FOREVER_VALID_TO
 from app.database import get_db
 from app.models import AccessToken, Command, Device, TokenClientUsage
-from app.schemas import CreateDeviceRequest, CreateTokenRequest
+from app.schemas import CreateDeviceRequest, CreateTokenRequest, UpdateTokenRequest
 from app.services import (
     check_admin_auth,
     delete_access_token,
@@ -18,6 +18,7 @@ from app.services import (
     normalize_gate_target,
     now_utc,
     public_url,
+    update_access_token,
 )
 
 
@@ -199,6 +200,63 @@ def admin_list_commands(
             }
             for command in commands
         ]
+    }
+
+
+@router.patch("/admin/tokens/{token_id}")
+def admin_update_token(
+    token_id: int,
+    payload: UpdateTokenRequest,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    for required_field in ("device_id", "gate_target", "open_cooldown_seconds", "is_active"):
+        if required_field in changes and changes[required_field] is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{required_field} cannot be null",
+            )
+
+    if "valid_hours" in changes:
+        valid_hours = changes.pop("valid_hours")
+        changes["valid_forever"] = valid_hours is None
+        changes["valid_to"] = (
+            FOREVER_VALID_TO
+            if valid_hours is None
+            else now_utc() + timedelta(hours=valid_hours)
+        )
+
+    result = update_access_token(
+        db,
+        token=token,
+        changes=changes,
+        request=request,
+    )
+
+    return {
+        "status": "ok",
+        **result,
+        "token": token.token_value,
+        "public_url": public_url(f"/pilot/{token.token_value}"),
+        "device_id": token.device_id,
+        "gate_target": token.gate_target,
+        "is_active": token.is_active,
+        "valid_to": None if token.valid_forever else token.valid_to.isoformat(),
+        "valid_forever": token.valid_forever,
+        "used_count": token.used_count,
+        "max_uses": token.max_uses,
+        "max_uses_per_client": token.max_uses_per_client,
+        "open_cooldown_seconds": token.open_cooldown_seconds,
     }
 
 

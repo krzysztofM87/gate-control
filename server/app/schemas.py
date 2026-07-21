@@ -34,6 +34,21 @@ class CreateTokenRequest(BaseModel):
     open_cooldown_seconds: int = Field(default=OPEN_COOLDOWN_SECONDS, ge=0, le=3600)
 
 
+class UpdateTokenRequest(BaseModel):
+    label: Optional[str] = None
+    pilot_title: Optional[str] = None
+    button_1_label: Optional[str] = None
+    button_2_label: Optional[str] = None
+    button_both_label: Optional[str] = None
+    device_id: Optional[str] = None
+    gate_target: Optional[str] = None
+    valid_hours: Optional[int] = Field(default=None, ge=1, le=24 * 60)
+    max_uses: Optional[int] = Field(default=None, ge=1, le=1000)
+    max_uses_per_client: Optional[int] = Field(default=None, ge=1, le=1000)
+    open_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+    is_active: Optional[bool] = None
+
+
 class CreateDeviceRequest(BaseModel):
     device_id: str
     name: Optional[str] = None
