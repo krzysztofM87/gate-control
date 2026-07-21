@@ -170,12 +170,16 @@ def consume_client_usage(
     token: AccessToken,
     request: Request,
 ) -> Optional[TokenClientUsage]:
-    if token.max_uses_per_client is None and token.client_validity_hours is None:
-        return None
-
     client_id = client_id_from_request(request)
+    client_restrictions_enabled = (
+        token.max_uses_per_client is not None
+        or token.client_validity_hours is not None
+    )
 
     if not client_id:
+        if not client_restrictions_enabled:
+            return None
+
         log_event(
             db,
             event_type="open_rejected",

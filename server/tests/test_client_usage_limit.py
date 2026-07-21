@@ -100,6 +100,62 @@ class ClientUsageLimitTest(unittest.TestCase):
         self.assertEqual(usages[0].client_key, client_key(first_client))
         self.assertNotEqual(usages[0].client_key, first_client)
 
+    def test_count_increases_after_client_limit_is_raised(self):
+        client_id = "raised-limit-phone-client-id-12345"
+        request = request_with_client_cookie(client_id)
+
+        create_command_from_token(
+            self.db,
+            token=self.token,
+            requested_gate="1",
+            request=request,
+        )
+
+        self.token.max_uses_per_client = 2
+        self.db.commit()
+
+        create_command_from_token(
+            self.db,
+            token=self.token,
+            requested_gate="1",
+            request=request,
+        )
+
+        usage = (
+            self.db.query(TokenClientUsage)
+            .filter(TokenClientUsage.client_key == client_key(client_id))
+            .one()
+        )
+        self.assertEqual(usage.used_count, 2)
+
+    def test_count_continues_when_client_limit_is_removed(self):
+        client_id = "unlimited-phone-client-id-12345678"
+        request = request_with_client_cookie(client_id)
+
+        create_command_from_token(
+            self.db,
+            token=self.token,
+            requested_gate="1",
+            request=request,
+        )
+
+        self.token.max_uses_per_client = None
+        self.db.commit()
+
+        create_command_from_token(
+            self.db,
+            token=self.token,
+            requested_gate="1",
+            request=request,
+        )
+
+        usage = (
+            self.db.query(TokenClientUsage)
+            .filter(TokenClientUsage.client_key == client_key(client_id))
+            .one()
+        )
+        self.assertEqual(usage.used_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

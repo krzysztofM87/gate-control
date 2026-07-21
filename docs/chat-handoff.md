@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po wdrozeniu reaktywacji tokenu i komunikatu o wyczerpanym limicie. Ostatni deploy na VPS: `Add token reactivation and limit notice`.
+Ostatnia aktualizacja: 2026-07-21, po wdrozeniu poprawki licznika uzyc telefonu bez aktywnego limitu. Ostatni deploy na VPS: `Fix per-phone usage counting`.
 
 Po podziale `main.py` naprawiono dwa bledy wykonania pilota: brak zwracania komendy z `create_command_from_token()` oraz brak importu `AccessToken` w endpointcie sprawdzajacym status komendy. Frontend pilota obsluguje tez odpowiedzi serwera, ktore nie sa JSON-em, i pokazuje wtedy czytelny blad HTTP.
 
@@ -114,7 +114,7 @@ Testy regresyjne timeoutu, limitu uzyc i waznosci na telefon oraz usuwania, edyc
 
 Token klienta ma losowa wartosc, waznosc od/do albo tryb bezterminowy, status, limit uzyc, cooldown oraz przypisanie do urzadzenia i kanalu bramy.
 
-Pilot moze miec opcjonalne `max_uses_per_client` i `client_validity_hours`. Przegladarka dostaje roczne cookie `gate_control_client_id`, a tabela `token_client_usages` przechowuje osobny licznik i czas pierwszego zaakceptowanego uzycia dla pary pilot + telefon. W bazie zapisywany jest SHA-256 identyfikatora cookie, nie jego surowa wartosc. Okno waznosci kazdego telefonu zaczyna sie przy jego pierwszym zaakceptowanym otwarciu. Po wygasnieciu backend zwraca `403` przed utworzeniem komendy; inne telefony nadal moga uzywac pilota. Oba ograniczenia obowiazuja strony `/pilot` i `/brama`.
+Pilot moze miec opcjonalne `max_uses_per_client` i `client_validity_hours`. Przegladarka dostaje roczne cookie `gate_control_client_id`, a tabela `token_client_usages` przechowuje osobny licznik i czas pierwszego zaakceptowanego uzycia dla pary pilot + telefon. Licznik telefonu zwieksza sie przy kazdym zaakceptowanym otwarciu, takze gdy limit telefonu jest pusty (`bez limitu`). W bazie zapisywany jest SHA-256 identyfikatora cookie, nie jego surowa wartosc. Okno waznosci kazdego telefonu zaczyna sie przy jego pierwszym zaakceptowanym otwarciu. Po wygasnieciu backend zwraca `403` przed utworzeniem komendy; inne telefony nadal moga uzywac pilota. Oba ograniczenia obowiazuja strony `/pilot` i `/brama`.
 
 Pojedynczy pilot mozna usunac z tabeli tokenow w panelu albo przez `DELETE /admin/tokens/{token_id}`. Operacja usuwa token i jego liczniki telefonow, anuluje komendy `pending`/`sent`, ale zachowuje wykonane komendy i logi.
 
