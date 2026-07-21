@@ -1,6 +1,6 @@
 ﻿from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, UniqueConstraint
 
 from app.database import Base
 
@@ -48,9 +48,24 @@ class AccessToken(Base):
     valid_forever = Column(Boolean, default=False, nullable=False)
 
     max_uses = Column(Integer, nullable=True)
+    max_uses_per_client = Column(Integer, nullable=True)
     used_count = Column(Integer, default=0, nullable=False)
     open_cooldown_seconds = Column(Integer, default=5, nullable=False)
 
+    created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TokenClientUsage(Base):
+    __tablename__ = "token_client_usages"
+    __table_args__ = (
+        UniqueConstraint("token_id", "client_key", name="uq_token_client_usage"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_id = Column(Integer, index=True, nullable=False)
+    client_key = Column(String(64), nullable=False)
+    used_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 

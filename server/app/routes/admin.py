@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import DEVICE_ID, FOREVER_VALID_TO
 from app.database import get_db
-from app.models import AccessToken, Command, Device
+from app.models import AccessToken, Command, Device, TokenClientUsage
 from app.schemas import CreateDeviceRequest, CreateTokenRequest
 from app.services import (
     check_admin_auth,
@@ -92,6 +92,7 @@ def admin_create_token(
         valid_to=valid_to,
         valid_forever=valid_forever,
         max_uses=payload.max_uses,
+        max_uses_per_client=payload.max_uses_per_client,
         used_count=0,
         open_cooldown_seconds=payload.open_cooldown_seconds,
     )
@@ -121,6 +122,7 @@ def admin_create_token(
         "valid_to": None if getattr(token, "valid_forever", False) else token.valid_to.isoformat(),
         "valid_forever": getattr(token, "valid_forever", False),
         "max_uses": token.max_uses,
+        "max_uses_per_client": token.max_uses_per_client,
         "valid_forever": getattr(token, "valid_forever", False),
     }
 
@@ -155,6 +157,7 @@ def admin_list_tokens(
         "valid_forever": getattr(token, "valid_forever", False),
                 "used_count": token.used_count,
                 "max_uses": token.max_uses,
+                "max_uses_per_client": token.max_uses_per_client,
         "valid_forever": getattr(token, "valid_forever", False),
             }
             for token in tokens
@@ -222,6 +225,7 @@ def admin_delete_all_tokens(
         )
     )
 
+    db.query(TokenClientUsage).delete(synchronize_session=False)
     db.query(AccessToken).delete(synchronize_session=False)
 
     log_event(

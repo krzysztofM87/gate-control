@@ -13,7 +13,7 @@ from app.config import (
     TOKEN_DEFAULT_VALID_HOURS,
 )
 from app.database import get_db
-from app.models import AccessToken, Command, Device
+from app.models import AccessToken, Command, Device, TokenClientUsage
 from app.services import (
     check_admin_auth,
     device_counts,
@@ -80,13 +80,14 @@ def admin_panel(
             <td><code>{html.escape(token.gate_target)}</code></td>
             <td>{html.escape(token.status)}</td>
             <td>{token.used_count} / {token.max_uses if token.max_uses is not None else "∞"}</td>
+            <td>{token.max_uses_per_client if token.max_uses_per_client is not None else "∞"}</td>
             <td>{html.escape(token_valid_to_text(token))}</td>
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
         </tr>
         """
 
     if not token_rows:
-        token_rows = "<tr><td colspan='8'>Brak tokenów.</td></tr>"
+        token_rows = "<tr><td colspan='9'>Brak tokenów.</td></tr>"
 
     command_rows = ""
 
@@ -216,6 +217,9 @@ def admin_panel(
                 </div>
             </div>
 
+            <label>Limit użyć na każdy telefon, puste = bez limitu</label>
+            <input name="max_uses_per_client" type="number" min="1" max="1000" placeholder="np. 2">
+
             <label>Cooldown w sekundach</label>
             <input name="open_cooldown_seconds" type="number" value="{OPEN_COOLDOWN_SECONDS}" min="0" max="3600">
 
@@ -234,6 +238,7 @@ def admin_panel(
                     <th>Cel</th>
                     <th>Status</th>
                     <th>Użycia</th>
+                    <th>Limit / telefon</th>
                     <th>Ważny do</th>
                     <th>Link</th>
                 </tr>
@@ -362,6 +367,18 @@ async def admin_panel_create_token(
 
         max_uses = max(1, min(max_uses, 1000))
 
+    max_uses_per_client_raw = str(form.get("max_uses_per_client") or "").strip()
+    if max_uses_per_client_raw == "":
+        max_uses_per_client = None
+    else:
+        try:
+            max_uses_per_client = int(max_uses_per_client_raw)
+        except ValueError:
+            max_uses_per_client = None
+
+        if max_uses_per_client is not None:
+            max_uses_per_client = max(1, min(max_uses_per_client, 1000))
+
     try:
         cooldown = int(form.get("open_cooldown_seconds") or OPEN_COOLDOWN_SECONDS)
     except ValueError:
@@ -392,6 +409,7 @@ async def admin_panel_create_token(
         valid_to=valid_to,
         valid_forever=valid_forever,
         max_uses=max_uses,
+        max_uses_per_client=max_uses_per_client,
         used_count=0,
         open_cooldown_seconds=cooldown,
     )
@@ -461,6 +479,7 @@ async def admin_panel_delete_all_tokens(
         )
     )
 
+    db.query(TokenClientUsage).delete(synchronize_session=False)
     db.query(AccessToken).delete(synchronize_session=False)
 
     log_event(
@@ -913,6 +932,20 @@ async def admin_panel_delete_device(
     )
 
     if delete_tokens:
+        token_ids = [
+            token_id
+            for (token_id,) in (
+                db.query(AccessToken.id)
+                .filter(AccessToken.device_id == device.device_id)
+                .all()
+            )
+        ]
+
+        if token_ids:
+            db.query(TokenClientUsage).filter(
+                TokenClientUsage.token_id.in_(token_ids)
+            ).delete(synchronize_session=False)
+
         deleted_tokens = (
             db.query(AccessToken)
             .filter(AccessToken.device_id == device.device_id)

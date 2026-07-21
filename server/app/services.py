@@ -1,10 +1,13 @@
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException, Request
-from sqlalchemy import text
+from fastapi import HTTPException, Request, Response
+from sqlalchemy import text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.config import (
@@ -18,7 +21,11 @@ from app.config import (
     PUBLIC_PATH_PREFIX,
 )
 from app.database import engine
-from app.models import AccessToken, Command, CommandLog, Device
+from app.models import AccessToken, Command, CommandLog, Device, TokenClientUsage
+
+
+CLIENT_COOKIE_NAME = "gate_control_client_id"
+CLIENT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
 
 def now_utc() -> datetime:
     return datetime.utcnow()
@@ -72,6 +79,138 @@ def token_prefix(token_value: Optional[str]) -> Optional[str]:
         return None
 
     return token_value[:10]
+
+
+def client_id_from_request(request: Request) -> Optional[str]:
+    client_id = (request.cookies.get(CLIENT_COOKIE_NAME) or "").strip()
+
+    if 20 <= len(client_id) <= 128:
+        return client_id
+
+    return None
+
+
+def ensure_client_id(request: Request) -> tuple[str, bool]:
+    client_id = client_id_from_request(request)
+
+    if client_id:
+        return client_id, False
+
+    return secrets.token_urlsafe(32), True
+
+
+def set_client_id_cookie(response: Response, client_id: str) -> None:
+    response.set_cookie(
+        key=CLIENT_COOKIE_NAME,
+        value=client_id,
+        max_age=CLIENT_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=BASE_URL.startswith("https://"),
+        samesite="lax",
+        path=PUBLIC_PATH_PREFIX or "/",
+    )
+
+
+def client_key(client_id: str) -> str:
+    return hashlib.sha256(client_id.encode("utf-8")).hexdigest()
+
+
+def get_client_usage(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Request,
+) -> Optional[TokenClientUsage]:
+    client_id = client_id_from_request(request)
+
+    if not client_id:
+        return None
+
+    return (
+        db.query(TokenClientUsage)
+        .filter(TokenClientUsage.token_id == token.id)
+        .filter(TokenClientUsage.client_key == client_key(client_id))
+        .first()
+    )
+
+
+def client_usage_values(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Request,
+) -> tuple[int, Optional[int]]:
+    usage = get_client_usage(db, token=token, request=request)
+    return (usage.used_count if usage else 0, token.max_uses_per_client)
+
+
+def consume_client_usage(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Request,
+) -> Optional[TokenClientUsage]:
+    if token.max_uses_per_client is None:
+        return None
+
+    client_id = client_id_from_request(request)
+
+    if not client_id:
+        log_event(
+            db,
+            event_type="open_rejected",
+            request=request,
+            status="client_cookie_missing",
+            token=token,
+            message="Client cookie missing",
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="Odśwież stronę pilota, aby zarejestrować ten telefon",
+        )
+
+    usage_key = client_key(client_id)
+    current_time = now_utc()
+
+    db.execute(
+        sqlite_insert(TokenClientUsage)
+        .values(
+            token_id=token.id,
+            client_key=usage_key,
+            used_count=0,
+            created_at=current_time,
+        )
+        .on_conflict_do_nothing(index_elements=["token_id", "client_key"])
+    )
+
+    result = db.execute(
+        update(TokenClientUsage)
+        .where(TokenClientUsage.token_id == token.id)
+        .where(TokenClientUsage.client_key == usage_key)
+        .where(TokenClientUsage.used_count < token.max_uses_per_client)
+        .values(
+            used_count=TokenClientUsage.used_count + 1,
+            last_used_at=current_time,
+        )
+    )
+
+    if result.rowcount != 1:
+        log_event(
+            db,
+            event_type="open_rejected",
+            request=request,
+            status="client_use_limit_reached",
+            token=token,
+            message="Per-client use limit reached",
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=403,
+            detail="Limit użyć na tym telefonie został wykorzystany",
+        )
+
+    return get_client_usage(db, token=token, request=request)
 
 
 def normalize_gate_target(value: str) -> str:
@@ -363,6 +502,8 @@ def create_command_from_token(
     else:
         command_name = token.gate_target
 
+    consume_client_usage(db, token=token, request=request)
+
     command = Command(
         command_id=str(uuid.uuid4()),
         device_id=token.device_id,
@@ -408,6 +549,7 @@ def run_schema_migrations() -> None:
             "button_2_label": "ALTER TABLE access_tokens ADD COLUMN button_2_label VARCHAR(120)",
             "button_both_label": "ALTER TABLE access_tokens ADD COLUMN button_both_label VARCHAR(120)",
             "valid_forever": "ALTER TABLE access_tokens ADD COLUMN valid_forever BOOLEAN DEFAULT 0",
+            "max_uses_per_client": "ALTER TABLE access_tokens ADD COLUMN max_uses_per_client INTEGER",
         }
 
         for name, sql in migrations.items():

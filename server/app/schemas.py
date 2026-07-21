@@ -28,6 +28,9 @@ class CreateTokenRequest(BaseModel):
     # null = bez limitu u?y?
     max_uses: Optional[int] = Field(default=10, ge=1, le=1000)
 
+    # null = bez limitu dla pojedynczego telefonu
+    max_uses_per_client: Optional[int] = Field(default=None, ge=1, le=1000)
+
     open_cooldown_seconds: int = Field(default=OPEN_COOLDOWN_SECONDS, ge=0, le=3600)
 
 

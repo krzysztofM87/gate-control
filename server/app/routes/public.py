@@ -15,12 +15,15 @@ from app.config import (
 from app.database import get_db
 from app.models import AccessToken, Command, CommandLog
 from app.services import (
+    client_usage_values,
     create_command_from_token,
+    ensure_client_id,
     expire_pending_command,
     expire_pending_commands,
     gate_label,
     now_iso,
     public_path,
+    set_client_id_cookie,
     validate_access_token,
 )
 from app.views import (
@@ -65,6 +68,15 @@ def gate_page(
     db: Session = Depends(get_db),
 ):
     token = validate_access_token(db, token_value, request)
+    client_id, client_id_is_new = ensure_client_id(request)
+    client_used_count, client_max_uses = client_usage_values(
+        db,
+        token=token,
+        request=request,
+    )
+    client_limit_reached = (
+        client_max_uses is not None and client_used_count >= client_max_uses
+    )
 
     buttons = ""
 
@@ -87,23 +99,32 @@ def gate_page(
 
         class_attr = f' class="{css_class}"' if css_class else ""
 
+        disabled_attr = " disabled" if client_limit_reached else ""
+
         buttons += f"""
         <form method="post" action="{html.escape(action)}">
-            <button{class_attr} type="submit">{html.escape(label)}</button>
+            <button{class_attr}{disabled_attr} type="submit">{html.escape(label)}</button>
         </form>
         """
 
     body = f"""
         <h1>Otwieranie bramy</h1>
         <p>Naciśnij przycisk, aby wysłać polecenie otwarcia.</p>
+        {"<p>Limit użyć na tym telefonie został wykorzystany.</p>" if client_limit_reached else ""}
         {buttons}
         <div class="small">
             Ważny do: {html.escape(token_valid_to_text(token))}<br>
-            Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}
+            Użycia: {token.used_count} / {token.max_uses if token.max_uses is not None else "bez limitu"}<br>
+            Ten telefon: {client_used_count} / {client_max_uses if client_max_uses is not None else "bez limitu"}
         </div>
     """
 
-    return render_page("Otwieranie bramy", body)
+    response = HTMLResponse(render_page("Otwieranie bramy", body))
+
+    if client_id_is_new:
+        set_client_id_cookie(response, client_id)
+
+    return response
 
 
 @router.post("/brama/{token_value}/open", response_class=HTMLResponse)
@@ -207,6 +228,15 @@ def client_pilot_page(
     db: Session = Depends(get_db),
 ):
     token = validate_access_token(db, token_value, request)
+    client_id, client_id_is_new = ensure_client_id(request)
+    client_used_count, client_max_uses = client_usage_values(
+        db,
+        token=token,
+        request=request,
+    )
+    client_limit_reached = (
+        client_max_uses is not None and client_used_count >= client_max_uses
+    )
 
     if token.gate_target == "open_both":
         buttons = [
@@ -235,6 +265,7 @@ def client_pilot_page(
         """
 
     max_uses_text = token.max_uses if token.max_uses is not None else "bez limitu"
+    client_max_uses_text = client_max_uses if client_max_uses is not None else "bez limitu"
     title = display_pilot_title(token)
     status_poll_attempts = max(
         20,
@@ -400,7 +431,8 @@ def client_pilot_page(
 
         <div class="footer">
             Ważny do: {html.escape(token_valid_to_text(token))}<br>
-            Użycia: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span>
+            Użycia łącznie: <span id="usage-count">{token.used_count}</span> / <span id="usage-max">{html.escape(str(max_uses_text))}</span><br>
+            Ten telefon: <span id="client-usage-count">{client_used_count}</span> / <span id="client-usage-max">{html.escape(str(client_max_uses_text))}</span>
         </div>
     </main>
 
@@ -413,8 +445,11 @@ def client_pilot_page(
         const stepDone = document.getElementById("step-done");
         const usageCountEl = document.getElementById("usage-count");
         const usageMaxEl = document.getElementById("usage-max");
+        const clientUsageCountEl = document.getElementById("client-usage-count");
+        const clientUsageMaxEl = document.getElementById("client-usage-max");
 
         let readyTimer = null;
+        let clientLimitReached = {"true" if client_limit_reached else "false"};
 
         function setStatus(text, mode) {{
             statusEl.textContent = text;
@@ -445,7 +480,7 @@ def client_pilot_page(
         }}
 
         function setBusy(isBusy) {{
-            buttons.forEach(button => button.disabled = isBusy);
+            buttons.forEach(button => button.disabled = isBusy || clientLimitReached);
             ledEl.classList.toggle("on", isBusy);
         }}
 
@@ -459,6 +494,20 @@ def client_pilot_page(
             if (typeof data.max_uses !== "undefined") {{
                 usageMaxEl.textContent = data.max_uses === null ? "bez limitu" : data.max_uses;
             }}
+
+            if (typeof data.client_used_count !== "undefined" && data.client_used_count !== null) {{
+                clientUsageCountEl.textContent = data.client_used_count;
+            }}
+
+            if (typeof data.client_max_uses !== "undefined") {{
+                clientUsageMaxEl.textContent = data.client_max_uses === null ? "bez limitu" : data.client_max_uses;
+            }}
+
+            const clientUsedCount = Number(clientUsageCountEl.textContent);
+            const clientMaxUses = data.client_max_uses;
+            clientLimitReached = clientMaxUses !== null
+                && typeof clientMaxUses !== "undefined"
+                && clientUsedCount >= Number(clientMaxUses);
         }}
 
         async function readJsonResponse(response) {{
@@ -590,12 +639,22 @@ def client_pilot_page(
                 pressButton(button.dataset.url, button.textContent.trim());
             }});
         }});
+
+        if (clientLimitReached) {{
+            setStatus("Limit użyć na tym telefonie został wykorzystany.", "err");
+            setBusy(false);
+        }}
     </script>
 </body>
 </html>
 """
 
-    return HTMLResponse(body)
+    response = HTMLResponse(body)
+
+    if client_id_is_new:
+        set_client_id_cookie(response, client_id)
+
+    return response
 
 
 @router.post("/pilot/{token_value}/press/{gate}")
@@ -615,6 +674,11 @@ def client_pilot_press(
     )
 
     db.refresh(token)
+    client_used_count, client_max_uses = client_usage_values(
+        db,
+        token=token,
+        request=request,
+    )
 
     return {
         "status": "ok",
@@ -624,6 +688,8 @@ def client_pilot_press(
         "status_url": public_path(f"/pilot/{token_value}/command/{command.command_id}/status"),
         "used_count": token.used_count,
         "max_uses": token.max_uses,
+        "client_used_count": client_used_count,
+        "client_max_uses": client_max_uses,
         "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
@@ -633,6 +699,7 @@ def client_pilot_press(
 def client_pilot_command_status(
     token_value: str,
     command_id: str,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     token = db.query(AccessToken).filter(AccessToken.token_value == token_value).first()
@@ -654,6 +721,12 @@ def client_pilot_command_status(
         db.commit()
         db.refresh(command)
 
+    client_used_count, client_max_uses = client_usage_values(
+        db,
+        token=token,
+        request=request,
+    )
+
     return {
         "command_id": command.command_id,
         "command": command.command,
@@ -665,6 +738,8 @@ def client_pilot_command_status(
         "message": command.message,
         "used_count": token.used_count,
         "max_uses": token.max_uses,
+        "client_used_count": client_used_count,
+        "client_max_uses": client_max_uses,
         "valid_forever": getattr(token, "valid_forever", False),
         "token_status": token.status,
     }
