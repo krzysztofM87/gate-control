@@ -338,6 +338,9 @@ def create_command_from_token(
     db.commit()
     db.refresh(command)
 
+    return command
+
+
 def run_schema_migrations() -> None:
     with engine.begin() as conn:
         rows = conn.execute(text("PRAGMA table_info(access_tokens)")).mappings().all()

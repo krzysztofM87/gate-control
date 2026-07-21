@@ -2,7 +2,7 @@
 
 Ten plik sluzy do szybkiego przekazania kontekstu projektu `gate-control` do nowego czatu albo innego narzedzia. Ma byc aktualizowany po istotnych zmianach w architekturze, deployu, endpointach, firmware albo procedurze pracy.
 
-Ostatnia aktualizacja: 2026-07-21, po lokalnej zmianie formularza tworzenia pilota w panelu admina. Ostatni deploy na VPS: commit `3933a3c` (`Split FastAPI main into modules`).
+Ostatnia aktualizacja: 2026-07-21, po lokalnej naprawie zwracania utworzonej komendy przez `create_command_from_token()`. Ostatni deploy na VPS: commit `d788070` (`Improve pilot creation form`).
 
 ## Krotki kontekst
 
