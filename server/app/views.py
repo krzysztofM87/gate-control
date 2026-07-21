@@ -261,6 +261,14 @@ def admin_panel_page(title: str, body: str) -> str:
         .danger {{
             background: #7a1f1f;
         }}
+        .inline-form {{
+            display: inline;
+        }}
+        button.compact {{
+            padding: 8px 10px;
+            margin-top: 0;
+            font-size: 13px;
+        }}
         .grid {{
             display: grid;
             grid-template-columns: 1fr 1fr;

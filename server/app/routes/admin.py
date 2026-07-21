@@ -11,6 +11,7 @@ from app.models import AccessToken, Command, Device, TokenClientUsage
 from app.schemas import CreateDeviceRequest, CreateTokenRequest
 from app.services import (
     check_admin_auth,
+    delete_access_token,
     device_counts,
     expire_pending_commands,
     log_event,
@@ -198,6 +199,28 @@ def admin_list_commands(
             }
             for command in commands
         ]
+    }
+
+
+@router.delete("/admin/tokens/{token_id}")
+def admin_delete_token(
+    token_id: int,
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    check_admin_auth(x_admin_token)
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    result = delete_access_token(db, token=token, request=request)
+
+    return {
+        "status": "ok",
+        **result,
     }
 
 @router.post("/admin/tokens/delete-all")

@@ -16,6 +16,7 @@ from app.database import get_db
 from app.models import AccessToken, Command, Device, TokenClientUsage
 from app.services import (
     check_admin_auth,
+    delete_access_token,
     device_counts,
     device_or_404,
     expire_pending_commands,
@@ -83,11 +84,16 @@ def admin_panel(
             <td>{token.max_uses_per_client if token.max_uses_per_client is not None else "∞"}</td>
             <td>{html.escape(token_valid_to_text(token))}</td>
             <td><a href="{html.escape(url)}" target="_blank">pilot</a><br><code>{html.escape(url)}</code></td>
+            <td>
+                <form class="inline-form" method="post" action="{public_path(f'/admin-panel/tokens/{token.id}/delete')}" onsubmit="return confirm('Usunąć ten pilot?')">
+                    <button class="danger compact" type="submit">Usuń</button>
+                </form>
+            </td>
         </tr>
         """
 
     if not token_rows:
-        token_rows = "<tr><td colspan='9'>Brak tokenów.</td></tr>"
+        token_rows = "<tr><td colspan='10'>Brak tokenów.</td></tr>"
 
     command_rows = ""
 
@@ -241,6 +247,7 @@ def admin_panel(
                     <th>Limit / telefon</th>
                     <th>Ważny do</th>
                     <th>Link</th>
+                    <th>Akcje</th>
                 </tr>
             </thead>
             <tbody>
@@ -443,6 +450,35 @@ async def admin_panel_create_token(
     """
 
     return HTMLResponse(admin_panel_page("Utworzono pilota", body))
+
+
+@router.post("/admin-panel/tokens/{token_id}/delete", response_class=HTMLResponse)
+def admin_panel_delete_token(
+    token_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not is_admin_panel_authorized(request):
+        return admin_login_page("Sesja wygasła albo token jest nieprawidłowy.")
+
+    token = db.query(AccessToken).filter(AccessToken.id == token_id).first()
+
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    result = delete_access_token(db, token=token, request=request)
+    label = result["label"] or f"ID {result['token_id']}"
+
+    body = f"""
+    <div class="card">
+        <h1>Usunięto pilota</h1>
+        <p><strong>{html.escape(label)}</strong></p>
+        <p>Anulowano oczekujących/wysłanych komend: <strong>{result['cancelled_commands']}</strong></p>
+        <a href="{public_path('/admin-panel')}">Wróć do panelu</a>
+    </div>
+    """
+
+    return HTMLResponse(admin_panel_page("Usunięto pilota", body))
 
 @router.post("/admin-panel/tokens/delete-all", response_class=HTMLResponse)
 async def admin_panel_delete_all_tokens(

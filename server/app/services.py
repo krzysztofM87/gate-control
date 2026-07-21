@@ -538,6 +538,56 @@ def create_command_from_token(
     return command
 
 
+def delete_access_token(
+    db: Session,
+    *,
+    token: AccessToken,
+    request: Optional[Request] = None,
+) -> dict:
+    token_id = token.id
+    token_label = token.label
+
+    cancelled_commands = (
+        db.query(Command)
+        .filter(Command.token_id == token_id)
+        .filter(Command.status.in_(["pending", "sent"]))
+        .update(
+            {
+                Command.status: "cancelled",
+                Command.message: "Cancelled because access token was deleted",
+            },
+            synchronize_session=False,
+        )
+    )
+    deleted_client_usages = (
+        db.query(TokenClientUsage)
+        .filter(TokenClientUsage.token_id == token_id)
+        .delete(synchronize_session=False)
+    )
+
+    log_event(
+        db,
+        event_type="token_deleted",
+        request=request,
+        status="ok",
+        token=token,
+        message=(
+            f"Token deleted; cancelled_commands={cancelled_commands}; "
+            f"deleted_client_usages={deleted_client_usages}"
+        ),
+    )
+
+    db.delete(token)
+    db.commit()
+
+    return {
+        "token_id": token_id,
+        "label": token_label,
+        "cancelled_commands": cancelled_commands,
+        "deleted_client_usages": deleted_client_usages,
+    }
+
+
 def run_schema_migrations() -> None:
     with engine.begin() as conn:
         rows = conn.execute(text("PRAGMA table_info(access_tokens)")).mappings().all()
